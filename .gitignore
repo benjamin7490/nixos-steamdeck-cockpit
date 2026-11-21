@@ -1,0 +1,11 @@
+result
+result-*
+*.swp
+*.swo
+*~
+__pycache__/
+*.pyc
+.DS_Store
+
+# Copie autonome hors-ligne (inutile dans le dépôt GitHub)
+steamdeck-cockpit-server.nix
