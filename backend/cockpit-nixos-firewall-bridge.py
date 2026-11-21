@@ -25,7 +25,6 @@ CTL_BIN = "/run/current-system/sw/bin/cockpit-nixos-ctl"
 
 BUS_NAME = "org.fedoraproject.FirewallD1"
 OBJ_PATH = "/org/fedoraproject/FirewallD1"
-ZONE_CONFIG_PATH = "/org/fedoraproject/FirewallD1/config/zone/0"
 
 KNOWN_SERVICES = {
     "ssh": [(22, "tcp")],
@@ -74,7 +73,10 @@ def run_ctl_async(args: list, callback=None) -> None:
     def _worker():
         subprocess.run([CTL_BIN] + args, check=False)
         if callback:
-            GLib.idle_add(callback)
+            def _once():
+                callback()
+                return False
+            GLib.idle_add(_once)
     threading.Thread(target=_worker, daemon=True).start()
 
 
@@ -111,36 +113,50 @@ class NixOSFirewallDShim(dbus.service.Object):
 
     @dbus.service.method(BUS_NAME + ".zone", in_signature="sssu", out_signature="s")
     def addPort(self, zone, port, protocol, timeout):
-        p = str(int(port))
+        try:
+            p_int = int(str(port).strip())
+            if p_int < 1 or p_int > 65535:
+                raise ValueError("Port hors plage")
+        except ValueError as exc:
+            raise dbus.DBusException("Port invalide (uniquement port numérique 1-65535) : " + str(exc))
+        p = str(p_int)
         proto = str(protocol).lower()
+        if proto not in ("tcp", "udp"):
+            raise dbus.DBusException("Protocole non supporté : " + proto)
         run_ctl_async(["fw-port-add", p, proto], lambda: self.PortAdded("nixos", p, proto, 0))
         return "nixos"
 
     @dbus.service.method(BUS_NAME + ".zone", in_signature="sss", out_signature="s")
     def removePort(self, zone, port, protocol):
-        p = str(int(port))
+        try:
+            p_int = int(str(port).strip())
+            if p_int < 1 or p_int > 65535:
+                raise ValueError("Port hors plage")
+        except ValueError as exc:
+            raise dbus.DBusException("Port invalide : " + str(exc))
+        p = str(p_int)
         proto = str(protocol).lower()
+        if proto not in ("tcp", "udp"):
+            raise dbus.DBusException("Protocole non supporté : " + proto)
         run_ctl_async(["fw-port-remove", p, proto], lambda: self.PortRemoved("nixos", p, proto))
         return "nixos"
 
     @dbus.service.method(BUS_NAME + ".zone", in_signature="ssu", out_signature="s")
     def addService(self, zone, service, timeout):
-        reqs = KNOWN_SERVICES.get(str(service), [])
-        def _apply():
-            for p, proto in reqs:
-                subprocess.run([CTL_BIN, "fw-port-add", str(p), proto], check=False)
-            GLib.idle_add(lambda: self.ServiceAdded("nixos", str(service), 0))
-        threading.Thread(target=_apply, daemon=True).start()
+        reqs = KNOWN_SERVICES.get(str(service))
+        if not reqs:
+            raise dbus.DBusException("Service pare-feu inconnu : " + str(service))
+        payload = json.dumps([{"port": p, "proto": proto} for p, proto in reqs])
+        run_ctl_async(["fw-ports-batch", "add", payload], lambda: self.ServiceAdded("nixos", str(service), 0))
         return "nixos"
 
     @dbus.service.method(BUS_NAME + ".zone", in_signature="ss", out_signature="s")
     def removeService(self, zone, service):
-        reqs = KNOWN_SERVICES.get(str(service), [])
-        def _apply():
-            for p, proto in reqs:
-                subprocess.run([CTL_BIN, "fw-port-remove", str(p), proto], check=False)
-            GLib.idle_add(lambda: self.ServiceRemoved("nixos", str(service)))
-        threading.Thread(target=_apply, daemon=True).start()
+        reqs = KNOWN_SERVICES.get(str(service))
+        if not reqs:
+            raise dbus.DBusException("Service pare-feu inconnu : " + str(service))
+        payload = json.dumps([{"port": p, "proto": proto} for p, proto in reqs])
+        run_ctl_async(["fw-ports-batch", "remove", payload], lambda: self.ServiceRemoved("nixos", str(service)))
         return "nixos"
 
     @dbus.service.method(BUS_NAME)

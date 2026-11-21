@@ -16,7 +16,6 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -216,12 +215,14 @@ def ensure_nix_env() -> None:
         os.environ["PATH"] = sw_bin + ":/run/wrappers/bin:" + path
     if not os.environ.get("NIX_PATH"):
         root_channels = "/nix/var/nix/profiles/per-user/root/channels"
-        if Path(root_channels + "/nixos").exists():
-            os.environ["NIX_PATH"] = (
-                "nixpkgs=" + root_channels + "/nixos"
-                ":nixos-config=/etc/nixos/configuration.nix"
-                ":" + root_channels
-            )
+        for chan in ("nixos", "nixpkgs"):
+            if Path(root_channels + "/" + chan).exists():
+                os.environ["NIX_PATH"] = (
+                    "nixpkgs=" + root_channels + "/" + chan
+                    + ":nixos-config=/etc/nixos/configuration.nix"
+                    + ":" + root_channels
+                )
+                break
 
 
 def ensure_root() -> None:
@@ -276,8 +277,12 @@ def apply_state_transactional(new_state: dict, mode: str = "switch") -> None:
             print("[ROLLBACK] Échec de nixos-rebuild : restauration de l'état sain précédent...", flush=True)
             if had_old_nix and old_nix_backup.exists():
                 shutil.copy2(old_nix_backup, MANAGED_NIX)
+            else:
+                MANAGED_NIX.write_text("# Fichier réinitialisé suite à rollback\n{ config, pkgs, lib, ... }:\n{\n}\n", encoding="utf-8")
             if had_old_state and old_state_backup.exists():
                 shutil.copy2(old_state_backup, STATE_FILE)
+            else:
+                STATE_FILE.unlink(missing_ok=True)
             raise
         finally:
             REBUILD_SENTINEL.unlink(missing_ok=True)
@@ -507,8 +512,14 @@ def cmd_pkg_search(query: str) -> None:
     print(json.dumps(out))
 
 
+def split_nmcli_terse(line: str) -> list:
+    return [part.replace("\\:", ":") for part in re.split(r"(?<!\\):", line)]
+
+
 def sync_nm_profiles_from_cli() -> dict:
-    """Extrait les profils NetworkManager persistants via nmcli (hors interfaces conteneurs/VM)."""
+    """Extrait les profils NetworkManager filaires/bridges/VLAN via nmcli.
+    Note sécurité : les profils Wi-Fi (802-11-wireless) sont volontairement exclus
+    pour ne jamais écrire de clés PSK en clair dans /etc/nixos/cockpit-managed.nix."""
     res = subprocess.run(
         ["nmcli", "-t", "-f", "NAME,UUID,TYPE,DEVICE", "connection", "show"],
         capture_output=True,
@@ -518,7 +529,7 @@ def sync_nm_profiles_from_cli() -> dict:
     ignore_prefixes = ("lo", "podman", "cni-", "virbr", "vnet", "veth", "docker", "br-", "tun", "tap")
     profiles = {}
     for line in res.stdout.splitlines():
-        parts = line.split(":")
+        parts = split_nmcli_terse(line)
         if len(parts) < 4:
             continue
         name, uuid, ctype, dev = parts[0], parts[1], parts[2], parts[3]
@@ -665,6 +676,29 @@ def main() -> int:
             apply_state_transactional(state, mode="switch")
             return 0
 
+        if cmd == "fw-ports-batch" and len(sys.argv) >= 4:
+            action = sys.argv[2].lower()
+            if action not in ("add", "remove"):
+                raise ValueError("Action batch invalide : " + action)
+            entries = json.loads(sys.argv[3])
+            state = load_state()
+            tcp = set(int(p) for p in state["firewall"].get("allowedTCPPorts", []))
+            udp = set(int(p) for p in state["firewall"].get("allowedUDPPorts", []))
+            for item in entries:
+                port = parse_ports([item["port"]])[0]
+                proto = str(item["proto"]).lower()
+                if proto not in ("tcp", "udp"):
+                    raise ValueError("Protocole invalide : " + proto)
+                target = tcp if proto == "tcp" else udp
+                if action == "add":
+                    target.add(port)
+                else:
+                    target.discard(port)
+            state["firewall"]["allowedTCPPorts"] = sorted(tcp)
+            state["firewall"]["allowedUDPPorts"] = sorted(udp)
+            apply_state_transactional(state, mode="switch")
+            return 0
+
         if cmd == "net-set" and len(sys.argv) >= 3:
             payload = json.loads(sys.argv[2])
             state = load_state()
@@ -732,7 +766,7 @@ def main() -> int:
 
         if cmd == "health-check":
             ensure_root()
-            stream_cmd(["/run/current-system/sw/bin/nixos-health-checker", "--check-only"], check=False)
+            stream_cmd(["/run/current-system/sw/bin/nixos-health-checker", "--check-only", "--update-probes"], check=False)
             return 0
 
         if cmd == "trigger-upgrade":

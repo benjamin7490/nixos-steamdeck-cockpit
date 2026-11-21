@@ -178,6 +178,7 @@ def perform_boot_rollback(state: dict, current_gen: int, reason: str) -> None:
     failed = list(dict.fromkeys(state.get("failed_generations", []) + [current_gen]))
     state["failed_generations"] = failed[-20:]
     state["unhealthy_boot_attempts"] = 0
+    state["tracked_unhealthy_gen"] = None
     state["status"] = "ROLLED_BACK"
     history = state.get("rollback_history", [])
     history.append({
@@ -313,27 +314,47 @@ def run_all_probes(cockpit_port: int, extra_units: list, wait_seconds: int = 45)
     return (all(p["ok"] for p in probes), probes)
 
 
+def detect_cockpit_port(explicit_port: int) -> int:
+    if explicit_port and explicit_port > 0:
+        return explicit_port
+    try:
+        res = subprocess.run(["systemctl", "show", "cockpit.socket", "--property=Listen"], capture_output=True, text=True)
+        m = re.search(r":(\d+)\b|\b(\d{2,5})\b", res.stdout)
+        if m:
+            p = int(m.group(1) or m.group(2))
+            if 1 <= p <= 65535:
+                return p
+    except Exception:
+        pass
+    return 9090
+
+
 def main() -> int:
+    ensure_nix_env()
     parser = argparse.ArgumentParser(description="NixOS Health-Checker & Auto-Rollback (MicroOS-style)")
     parser.add_argument("--boot-counter", action="store_true", help="Phase 1 (précoce) : incrémente le compteur de boot et rollback si boot-loop")
     parser.add_argument("--verify", action="store_true", help="Phase 2 (boot-complete) : exécute les sondes, bénit ou rollback")
     parser.add_argument("--live-check", action="store_true", help="Phase post-upgrade à chaud : rollback à chaud si une sonde échoue")
     parser.add_argument("--check-only", action="store_true", help="Exécute les sondes en lecture seule et affiche le JSON")
+    parser.add_argument("--update-probes", action="store_true", help="Avec --check-only : met à jour probes et last_check_time dans state.json")
     parser.add_argument("--max-attempts", type=int, default=3, help="Nombre max de démarrages échoués avant rollback")
-    parser.add_argument("--cockpit-port", type=int, default=9090, help="Port TCP de Cockpit à vérifier")
+    parser.add_argument("--cockpit-port", type=int, default=0, help="Port TCP de Cockpit à vérifier (0 = auto-détection)")
     parser.add_argument("--wait-seconds", type=int, default=45, help="Délai max d'attente stabilisation réseau/services")
     parser.add_argument("--extra-unit", action="append", default=[], help="Unité systemd supplémentaire à vérifier")
     args = parser.parse_args()
 
+    cockpit_port = detect_cockpit_port(args.cockpit_port)
     state = load_state()
     state["max_boot_attempts"] = args.max_attempts
     current_gen, current_store = detect_generation(prefer_current=(args.live_check or args.check_only))
     state["current_gen"] = current_gen
 
     if args.check_only:
-        ok, probes = run_all_probes(args.cockpit_port, args.extra_unit, wait_seconds=0)
+        ok, probes = run_all_probes(cockpit_port, args.extra_unit, wait_seconds=0)
         state["probes"] = probes
         state["last_check_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if args.update_probes and os.geteuid() == 0:
+            save_state_durable(state)
         print(json.dumps({"healthy": ok, "state": state}, indent=2))
         return 0 if ok else 1
 
@@ -375,7 +396,7 @@ def main() -> int:
 
     # PHASE 2 : VÉRIFICATION COMPLÈTE AVANT boot-complete.target
     if args.verify:
-        ok, probes = run_all_probes(args.cockpit_port, args.extra_unit, wait_seconds=args.wait_seconds)
+        ok, probes = run_all_probes(cockpit_port, args.extra_unit, wait_seconds=args.wait_seconds)
         state["probes"] = probes
         state["last_check_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -383,6 +404,7 @@ def main() -> int:
             state["last_good_gen"] = current_gen
             state["last_good_system"] = current_store
             state["unhealthy_boot_attempts"] = 0
+            state["tracked_unhealthy_gen"] = None
             state["status"] = "HEALTHY"
             save_state_durable(state)
             log("[verify] SUCCÈS : Génération #" + str(current_gen) + " vérifiée et marquée SAINE (last_good).")
@@ -414,7 +436,20 @@ def main() -> int:
 
     # PHASE 3 : VÉRIFICATION POST-UPGRADE À CHAUD (sans reboot)
     if args.live_check:
-        ok, probes = run_all_probes(args.cockpit_port, args.extra_unit, wait_seconds=20)
+        # Si un redémarrage est déjà en cours (ex. MAJ noyau via system.autoUpgrade), ne pas interférer :
+        # la vérification se fera proprement au prochain boot par --boot-counter et --verify.
+        sys_state = subprocess.run(["systemctl", "is-system-running"], capture_output=True, text=True).stdout.strip()
+        if sys_state == "stopping":
+            log("[live-check] Redémarrage système déjà en cours : vérification reportée au prochain boot.")
+            return 0
+        for part in ("kernel", "initrd", "kernel-modules"):
+            booted_p = Path("/run/booted-system") / part
+            next_p = SYSTEM_PROFILE / part
+            if booted_p.exists() and next_p.exists() and os.path.realpath(str(booted_p)) != os.path.realpath(str(next_p)):
+                log("[live-check] Changement noyau/initrd détecté (" + part + ") : vérification reportée au prochain boot.")
+                return 0
+
+        ok, probes = run_all_probes(cockpit_port, args.extra_unit, wait_seconds=20)
         state["probes"] = probes
         state["last_check_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if ok:

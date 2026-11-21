@@ -14,7 +14,7 @@ Intègre :
 
 import hashlib
 import json
-import os
+import re
 import subprocess
 import sys
 import time
@@ -28,6 +28,10 @@ CTL_BIN = "/run/current-system/sw/bin/cockpit-nixos-ctl"
 IGNORE_PREFIXES = ("lo", "podman", "cni-", "virbr", "vnet", "veth", "docker", "br-", "tun", "tap")
 
 
+def split_nmcli_terse(line: str) -> list:
+    return [part.replace("\\:", ":") for part in re.split(r"(?<!\\):", line)]
+
+
 def snapshot_nm_profiles() -> str:
     res = subprocess.run(
         ["nmcli", "-t", "-f", "NAME,UUID,TYPE,DEVICE", "connection", "show"],
@@ -37,7 +41,7 @@ def snapshot_nm_profiles() -> str:
     )
     items = []
     for line in sorted(res.stdout.splitlines()):
-        parts = line.split(":")
+        parts = split_nmcli_terse(line)
         if len(parts) < 4:
             continue
         name, uuid, ctype, dev = parts[0], parts[1], parts[2], parts[3]

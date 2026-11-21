@@ -41,7 +41,7 @@
 
   function setBusy(state) {
     busy = state;
-    var buttons = document.querySelectorAll("button[type='submit'], #btn-rebuild-now, #btn-dry-build, #btn-rollback, #btn-gc, #btn-optimise, #btn-sync-nm, #btn-health-check, #btn-trigger-upgrade");
+    var buttons = document.querySelectorAll("button[type='submit'], .admin-only, #btn-rebuild-now, #btn-dry-build, #btn-rollback, #btn-gc, #btn-optimise, #btn-sync-nm, #btn-health-check, #btn-trigger-upgrade");
     for (var i = 0; i < buttons.length; i++) {
       buttons[i].disabled = state || !isAdmin;
     }
@@ -73,15 +73,15 @@
   function spawnCtlWrite(args, title) {
     if (!isAdmin) {
       showAlert("Activez d'abord l'accès administrateur dans la barre supérieure de Cockpit.", "error");
-      return Promise.reject(new Error("admin required"));
+      return Promise.resolve(false);
     }
     hideAlert();
     setBusy(true);
     setJobStatus("En cours...", "running");
     resetLog(title);
 
-    var proc = cockpit.spawn(["sudo", "-n", CTL_BIN].concat(args), {
-      superuser: "try",
+    var proc = cockpit.spawn([CTL_BIN].concat(args), {
+      superuser: "require",
       err: "out"
     });
 
@@ -93,13 +93,13 @@
       setJobStatus("Succès", "ok");
       showAlert(title + " : opération terminée avec succès.", "success");
       setBusy(false);
-      return refreshAll();
+      return refreshAll().then(function () { return true; });
     }).catch(function (err) {
       appendLog("\n[ERREUR] " + (err.message || String(err)) + "\n");
       setJobStatus("Échec", "err");
       showAlert(title + " : échec (" + (err.message || "voir le journal") + "). Rollback automatique appliqué si nécessaire.", "error");
       setBusy(false);
-      throw err;
+      return false;
     });
   }
 
@@ -142,7 +142,7 @@
       if (!g.current) {
         var btn = document.createElement("button");
         btn.type = "button";
-        btn.className = "btn btn-small btn-secondary";
+        btn.className = "btn btn-small btn-secondary admin-only";
         btn.textContent = "Activer #" + String(g.id);
         btn.disabled = !isAdmin || busy;
         (function (genId) {
@@ -193,7 +193,7 @@
       var tdAct = document.createElement("td");
       var btn = document.createElement("button");
       btn.type = "button";
-      btn.className = "btn btn-small btn-danger";
+      btn.className = "btn btn-small btn-danger admin-only";
       btn.textContent = "Supprimer";
       btn.disabled = !isAdmin || busy;
       (function (pkgName) {
@@ -284,7 +284,7 @@
       var tdAct = document.createElement("td");
       var btn = document.createElement("button");
       btn.type = "button";
-      btn.className = "btn btn-small btn-danger";
+      btn.className = "btn btn-small btn-danger admin-only";
       btn.textContent = "Retirer";
       btn.disabled = !isAdmin || busy;
       (function (mp) {
@@ -482,8 +482,10 @@
       e.preventDefault();
       var pkg = $("input-pkg-name").value.trim();
       if (!pkg) return;
-      spawnCtlWrite(["pkg-add", pkg], "Installation déclarative de " + pkg).then(function () {
-        $("input-pkg-name").value = "";
+      spawnCtlWrite(["pkg-add", pkg], "Installation déclarative de " + pkg).then(function (ok) {
+        if (ok) {
+          $("input-pkg-name").value = "";
+        }
       });
     });
 
@@ -513,7 +515,7 @@
           info.appendChild(document.createTextNode(item.pname + " (" + (item.description || "") + ")"));
           var addBtn = document.createElement("button");
           addBtn.type = "button";
-          addBtn.className = "btn btn-small btn-primary";
+          addBtn.className = "btn btn-small btn-primary admin-only";
           addBtn.textContent = "Installer";
           addBtn.disabled = !isAdmin || busy;
           (function (attr) {
@@ -558,9 +560,11 @@
         fsType: $("mnt-fstype").value,
         options: $("mnt-options").value.trim()
       });
-      spawnCtlWrite(["mount-add", payload], "Ajout montage déclaratif " + $("mnt-point").value.trim()).then(function () {
-        $("mnt-point").value = "";
-        $("mnt-device").value = "";
+      spawnCtlWrite(["mount-add", payload], "Ajout montage déclaratif " + $("mnt-point").value.trim()).then(function (ok) {
+        if (ok) {
+          $("mnt-point").value = "";
+          $("mnt-device").value = "";
+        }
       });
     });
   }

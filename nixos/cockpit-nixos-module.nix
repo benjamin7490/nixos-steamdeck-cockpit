@@ -18,7 +18,7 @@ let
     doCheck = false;
   } (builtins.readFile ../backend/nixos-health-checker.py);
 
-  # 3. Bridge D-Bus Pare-feu (org.fedoraproject.FirewallD1 -> networking.firewall)
+  # 4. Bridge D-Bus Pare-feu (org.fedoraproject.FirewallD1 -> networking.firewall)
   cockpitNixosFirewallBridge = pkgs.writers.writePython3Bin "cockpit-nixos-firewall-bridge" {
     doCheck = false;
     libraries = with pkgs.python3Packages; [
@@ -27,7 +27,7 @@ let
     ];
   } (builtins.readFile ../backend/cockpit-nixos-firewall-bridge.py);
 
-  # 4. Paquet D-Bus policy pour autoriser le bridge FirewallD1 (restreint à root + wheel)
+  # 5. Paquet D-Bus policy pour autoriser le bridge FirewallD1 (restreint à root + wheel)
   firewallBridgeDbusPolicy = pkgs.writeTextDir "share/dbus-1/system.d/org.fedoraproject.FirewallD1.conf" ''
     <!DOCTYPE busconfig PUBLIC
      "-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN"
@@ -42,6 +42,9 @@ let
       </policy>
       <policy context="default">
         <deny own="org.fedoraproject.FirewallD1"/>
+        <deny send_destination="org.fedoraproject.FirewallD1"
+              send_interface="org.fedoraproject.FirewallD1"
+              send_member="reload"/>
         <deny send_destination="org.fedoraproject.FirewallD1"
               send_interface="org.fedoraproject.FirewallD1.zone"
               send_member="addPort"/>
@@ -58,7 +61,7 @@ let
     </busconfig>
   '';
 
-  # 5. Dérivation du plugin Frontend Cockpit (exposé dans /run/current-system/sw/share/cockpit/nixos-manager)
+  # 6. Dérivation du plugin Frontend Cockpit (exposé dans /run/current-system/sw/share/cockpit/nixos-manager)
   cockpitNixosPlugin = pkgs.runCommand "cockpit-nixos-plugin" { } ''
     mkdir -p $out/share/cockpit/nixos-manager
     cp ${../plugin/manifest.json} $out/share/cockpit/nixos-manager/manifest.json
@@ -201,7 +204,7 @@ in
     ++ lib.optionals cfg.enableMachines [
       cockpit-machines
       libvirt-dbus
-      virt-install
+      virt-manager
       virt-viewer
       dnsmasq
     ];
@@ -212,12 +215,7 @@ in
     system.activationScripts.initCockpitManaged = lib.stringAfter [ "etc" ] ''
       mkdir -p /etc/nixos /var/lib/cockpit-nixos/backups /run/cockpit-nixos
       if [ ! -f /etc/nixos/cockpit-managed.nix ]; then
-        cat > /etc/nixos/cockpit-managed.nix <<'EOF'
-      # Fichier initialisé automatiquement par cockpit-nixos
-      { config, pkgs, lib, ... }:
-      {
-      }
-      EOF
+        printf '# Fichier initialisé automatiquement par cockpit-nixos\n{ config, pkgs, lib, ... }:\n{\n}\n' > /etc/nixos/cockpit-managed.nix
         chmod 0644 /etc/nixos/cockpit-managed.nix
       fi
     '';
@@ -303,6 +301,7 @@ in
     virtualisation.podman = lib.mkIf cfg.enablePodman {
       enable = true;
       dockerCompat = true;
+      dockerSocket.enable = true;
       defaultNetwork.settings.dns_enabled = true;
       autoPrune = {
         enable = true;
@@ -310,16 +309,11 @@ in
       };
     };
 
-    systemd.sockets.podman = lib.mkIf cfg.enablePodman {
-      enable = true;
-      wantedBy = [ "sockets.target" ];
-    };
-
     # -------------------------------------------------------------------------
     # 6. Sécurité : Règles Polkit & Sudo calibrées au moindre privilège
     # -------------------------------------------------------------------------
     security.polkit.enable = true;
-    security.polkit.extraRules = ''
+    security.polkit.extraConfig = ''
       polkit.addRule(function(action, subject) {
         if (!subject.isInGroup("wheel")) {
           return polkit.Result.NOT_HANDLED;
@@ -414,6 +408,7 @@ in
 
     # Phase 3 (post-upgrade à chaud sans reboot) : vérifie les services et rollback live si cassé
     systemd.services.nixos-upgrade = lib.mkIf (cfg.enableAutoUpgrade && cfg.enableHealthChecker) {
+      path = [ pkgs.iproute2 ];
       serviceConfig.ExecStartPost = [
         "${nixosHealthChecker}/bin/nixos-health-checker --live-check --cockpit-port ${toString cfg.port}"
       ];

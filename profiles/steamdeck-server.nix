@@ -13,7 +13,7 @@
 # quelle option directement dans votre /etc/nixos/configuration.nix.
 # ==============================================================================
 
-{ config, pkgs, lib, ... }:
+{ config, options, pkgs, lib, ... }:
 
 let
   cfgFan = config.services.steamdeck-server;
@@ -64,9 +64,12 @@ let
         try:
             pwm_en.write_text("1\n")
             while running:
-                apu = find_hwmon({"k10temp", "amdgpu"})
-                temp = int((apu / "temp1_input").read_text().strip()) / 1000.0 if apu and (apu / "temp1_input").exists() else 65.0
-                pwm_val.write_text(str(interp(temp)) + "\n")
+                try:
+                    apu = find_hwmon({"k10temp", "amdgpu"})
+                    temp = int((apu / "temp1_input").read_text().strip()) / 1000.0 if apu and (apu / "temp1_input").exists() else 65.0
+                    pwm_val.write_text(str(interp(temp)) + "\n")
+                except Exception as exc:
+                    print("[steamdeck-server-fan] Erreur lecture/écriture hwmon : " + str(exc), file=sys.stderr, flush=True)
                 time.sleep(2.0)
         finally:
             # Sécurité : rend le contrôle au contrôleur embarqué (BIOS/EC) à l'arrêt
@@ -105,89 +108,102 @@ in
     };
   };
 
-  config = {
-    # --------------------------------------------------------------------------
-    # 1. Écosystème Cockpit Déclaratif + Podman + KVM + Files + Health-Checker
-    # --------------------------------------------------------------------------
-    services.cockpit-nixos = {
-      enable = lib.mkDefault true;
-      port = lib.mkDefault 9090;
-      enableMachines = lib.mkDefault true;
-      enablePodman = lib.mkDefault true;
-      enableFiles = lib.mkDefault true;
-      enableNetworkInterception = lib.mkDefault true;
-      enableFirewallBridge = lib.mkDefault true;
-      enableAutoUpgrade = lib.mkDefault true;
-      autoUpgradeDates = lib.mkDefault "03:30";
-      autoUpgradeRebootWindow = lib.mkDefault {
-        lower = "03:00";
-        upper = "05:30";
+  config = lib.mkMerge [
+    {
+      # --------------------------------------------------------------------------
+      # 1. Écosystème Cockpit Déclaratif + Podman + KVM + Files + Health-Checker
+      # --------------------------------------------------------------------------
+      services.cockpit-nixos = {
+        enable = lib.mkDefault true;
+        port = lib.mkDefault 9090;
+        enableMachines = lib.mkDefault true;
+        enablePodman = lib.mkDefault true;
+        enableFiles = lib.mkDefault true;
+        enableNetworkInterception = lib.mkDefault true;
+        enableFirewallBridge = lib.mkDefault true;
+        enableAutoUpgrade = lib.mkDefault true;
+        autoUpgradeDates = lib.mkDefault "03:30";
+        autoUpgradeRebootWindow = lib.mkDefault {
+          lower = "03:00";
+          upper = "05:30";
+        };
+        enableHealthChecker = lib.mkDefault true;
+        maxBootAttempts = lib.mkDefault 3;
       };
-      enableHealthChecker = lib.mkDefault true;
-      maxBootAttempts = lib.mkDefault 3;
-    };
 
-    # Découverte mDNS (.local) sur le LAN
-    services.avahi = {
-      enable = lib.mkDefault true;
-      nssmdns4 = lib.mkDefault true;
-      publish = {
+      # Découverte mDNS (.local) sur le LAN
+      services.avahi = {
+        enable = lib.mkDefault true;
+        nssmdns4 = lib.mkDefault true;
+      };
+
+      users.users = lib.genAttrs cfgFan.adminUsers (name: {
+        extraGroups = [ "wheel" "networkmanager" ]
+          ++ lib.optional config.services.cockpit-nixos.enableMachines "libvirtd";
+      });
+
+      # --------------------------------------------------------------------------
+      # 2. Drivers Steam Deck (ventilateur + matériel) & Tuning Serveur 24/7
+      # --------------------------------------------------------------------------
+      jovian = {
+        devices.steamdeck = {
+          enable = lib.mkDefault true;
+          autoUpdate = lib.mkDefault false; # Pas de flash BIOS/EC surprise sur un serveur
+        };
+        steam.enable = lib.mkDefault false; # Mode serveur headless (pas de Gamescope/Steam UI)
+      };
+
+      hardware.enableRedistributableFirmware = lib.mkDefault true;
+      hardware.cpu.amd.updateMicrocode = lib.mkDefault true;
+      nixpkgs.config.allowUnfree = lib.mkDefault true;
+
+      environment.systemPackages = with pkgs; [
+        nvme-cli
+        powertop
+        htop
+      ];
+
+      # Drivers EC/hwmon Steam Deck + extinction écran après 60s (anti burn-in OLED)
+      boot.kernelModules = [ "steamdeck" "steamdeck_hwmon" "k10temp" ];
+      boot.kernelParams = [ "consoleblank=60" ];
+
+      # Empêche toute mise en veille en mode serveur 24/7
+      systemd.targets.sleep.enable = lib.mkDefault false;
+      systemd.targets.suspend.enable = lib.mkDefault false;
+      systemd.targets.hibernate.enable = lib.mkDefault false;
+      systemd.targets.hybrid-sleep.enable = lib.mkDefault false;
+
+      # Courbe ventilateur serveur optionnelle (si services.steamdeck-server.enableCustomFanCurve = true)
+      systemd.services.steamdeck-server-fan = lib.mkIf cfgFan.enableCustomFanCurve {
+        description = "Courbe ventilateur serveur 24/7 via steamdeck_hwmon";
+        after = [ "multi-user.target" ];
+        wantedBy = [ "multi-user.target" ];
+        serviceConfig = {
+          Type = "simple";
+          ExecStart = "${steamdeckServerFanDaemon}/bin/steamdeck-server-fan";
+          Restart = "on-failure";
+          RestartSec = "5s";
+        };
+      };
+
+      systemd.services.jupiter-fan-control = lib.mkIf cfgFan.enableCustomFanCurve {
+        enable = lib.mkForce false;
+      };
+    }
+
+    # Publication mDNS Avahi (compatible NixOS 26.05+/unstable et fallback 24.11/25.05)
+    (if (options.services.avahi ? settings) then {
+      services.avahi.settings.publish = {
+        disable-publishing = lib.mkDefault false;
+        publish-addresses = lib.mkDefault true;
+        publish-workstation = lib.mkDefault true;
+      };
+    } else {
+      services.avahi.publish = {
         enable = lib.mkDefault true;
         addresses = lib.mkDefault true;
         workstation = lib.mkDefault true;
       };
-    };
-
-    users.users = lib.genAttrs cfgFan.adminUsers (name: {
-      extraGroups = [ "wheel" "networkmanager" "libvirtd" ];
-    });
-
-    # --------------------------------------------------------------------------
-    # 2. Drivers Steam Deck (ventilateur + matériel) & Tuning Serveur 24/7
-    # --------------------------------------------------------------------------
-    jovian = {
-      devices.steamdeck = {
-        enable = lib.mkDefault true;
-        autoUpdate = lib.mkDefault false; # Pas de flash BIOS/EC surprise sur un serveur
-      };
-      steam.enable = lib.mkDefault false; # Mode serveur headless (pas de Gamescope/Steam UI)
-    };
-
-    hardware.enableRedistributableFirmware = lib.mkDefault true;
-    hardware.cpu.amd.updateMicrocode = lib.mkDefault true;
-    nixpkgs.config.allowUnfree = lib.mkDefault true;
-
-    environment.systemPackages = with pkgs; [
-      nvme-cli
-      powertop
-      htop
-    ];
-
-    # Drivers EC/hwmon Steam Deck + extinction écran après 60s (anti burn-in OLED)
-    boot.kernelModules = [ "steamdeck" "steamdeck_hwmon" "k10temp" ];
-    boot.kernelParams = [ "consoleblank=60" ];
-
-    # Empêche toute mise en veille en mode serveur 24/7
-    systemd.targets.sleep.enable = lib.mkDefault false;
-    systemd.targets.suspend.enable = lib.mkDefault false;
-    systemd.targets.hibernate.enable = lib.mkDefault false;
-    systemd.targets.hybrid-sleep.enable = lib.mkDefault false;
-
-    # Courbe ventilateur serveur optionnelle (si services.steamdeck-server.enableCustomFanCurve = true)
-    systemd.services.steamdeck-server-fan = lib.mkIf cfgFan.enableCustomFanCurve {
-      description = "Courbe ventilateur serveur 24/7 via steamdeck_hwmon";
-      after = [ "multi-user.target" ];
-      wantedBy = [ "multi-user.target" ];
-      serviceConfig = {
-        Type = "simple";
-        ExecStart = "${steamdeckServerFanDaemon}/bin/steamdeck-server-fan";
-        Restart = "on-failure";
-        RestartSec = "5s";
-      };
-    };
-
-    systemd.services.jupiter-fan-control = lib.mkIf cfgFan.enableCustomFanCurve {
-      enable = lib.mkForce false;
-    };
-  };
+    })
+  ];
 }
