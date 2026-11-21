@@ -12,9 +12,9 @@
     (builtins.fetchTarball "https://github.com/benjamin7490/nixos-steamdeck-cockpit/archive/main.tar.gz")
   ];
 
-  # Indiquez votre utilisateur NixOS existant sur le serveur (ou laisser [] si les groupes
+  # Indiquez votre utilisateur NixOS existant sur le serveur (ou laisser commenté si les groupes
   # wheel, networkmanager et libvirtd sont déjà définis dans configuration.nix)
-  services.steamdeck-server.adminUsers = [ "benjamin" ];
+  # services.steamdeck-server.adminUsers = [ "<votre-utilisateur>" ];
 
   # Optionnel : passer à true pour une courbe ventilateur serveur plus agressive
   # services.steamdeck-server.enableCustomFanCurve = true;

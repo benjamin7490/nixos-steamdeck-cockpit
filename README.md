@@ -1,174 +1,242 @@
-# Cockpit-NixOS — Écosystème Cockpit Natif & Déclaratif pour NixOS (+ Serveur Steam Deck)
+# nixos-steamdeck-cockpit
 
-Architecture complète, code source frontend/backend et déploiement en **un seul fichier `.nix`** pour exécuter l'ensemble de l'écosystème Cockpit (`cockpit-machines`, `cockpit-files`, `cockpit-podman`, réseau, pare-feu, paquets, générations) de façon **100 % native et déclarative** sur NixOS.
+![NixOS](https://img.shields.io/badge/NixOS-unstable%20%7C%2025.05%2B-5277C3?logo=nixos&logoColor=white)
+![Cockpit](https://img.shields.io/badge/Cockpit-Declarative%20Bridge-0066CC)
+![Podman](https://img.shields.io/badge/Podman-Ready-892CA0?logo=podman&logoColor=white)
+![KVM / Libvirt](https://img.shields.io/badge/KVM%20%2F%20Libvirt-cockpit--machines-orange)
+![Steam Deck](https://img.shields.io/badge/Steam%20Deck-Jovian--NixOS-1A9FFF?logo=steam&logoColor=white)
 
----
-
-## 1. Architecture Globale
-
-```mermaid
-flowchart TB
-  subgraph UI["Interface Web Cockpit (:9090 HTTPS)"]
-    P1["Onglet Natif : Networking"]
-    P2["Onglet Natif : Firewall"]
-    P3["cockpit-machines (KVM/QEMU)"]
-    P4["cockpit-podman (Conteneurs)"]
-    P5["cockpit-files (Fichiers & Montages)"]
-    P6["Plugin : NixOS Déclaratif\n(Générations, Rollback, GC, Paquets,\nRéseau/FW, Montages, Capteurs Steam Deck)"]
-    PK["PackageKit masqué\n(/etc/cockpit/packagekit.override.json)"]
-  end
-
-  subgraph INTERCEPT["Couche d'Interception & Bridges"]
-    NM["NetworkManager\n/etc/NetworkManager/system-connections"]
-    NETW["cockpit-nixos-net-intercept\n(systemd.path + debounce 3s + anti-boucle SHA-256)"]
-    FWB["cockpit-nixos-firewall-bridge\n(D-Bus org.fedoraproject.FirewallD1 -> NixOS)"]
-    CTL["cockpit-nixos-ctl\n(CLI privilégié transactionnel, flock, validation stricte)"]
-  end
-
-  subgraph NIX["Système NixOS Déclaratif"]
-    STATE["/var/lib/cockpit-nixos/state.json\n+ /var/lib/cockpit-nixos/backups/"]
-    MANAGED["/etc/nixos/cockpit-managed.nix\n(import conditionnel dans configuration.nix)"]
-    REBUILD["nix-instantiate --parse\n-> nixos-rebuild switch\n(rollback auto si échec)"]
-    STORE["Nix Store & Profils\n(/nix/var/nix/profiles/system)"]
-  end
-
-  subgraph HW["Services & Matériel Steam Deck"]
-    LIBV["libvirtd + libvirt-dbus + QEMU/KVM + swtpm"]
-    POD["Podman + podman.socket + DNS"]
-    UDISK["udisks2 + /srv/data + /mnt/storage"]
-    SD["Jovian-NixOS : Kernel Neptune\nsteamdeck_hwmon + jupiter-fan-control"]
-  end
-
-  P1 --> NM --> NETW --> CTL
-  P2 --> FWB --> CTL
-  P6 -- "cockpit.spawn + sudo -n" --> CTL
-  CTL --> STATE
-  CTL --> MANAGED --> REBUILD --> STORE
-  P3 --> LIBV
-  P4 --> POD
-  P5 --> UDISK
-  P6 -. "télémétrie /sys/class/hwmon" .-> SD
-```
-
-### Pourquoi cette architecture résout les frictions Cockpit ↔ NixOS
-
-| Limite classique Cockpit sur NixOS | Solution implémentée |
-| :--- | :--- |
-| **PackageKit cassé** (pas de backend Nix) | Masqué proprement via `/etc/cockpit/packagekit.override.json` (JSON Merge Patch officiel) et remplacé par l'onglet **Paquets Nix** du plugin `cockpit-nixos`. |
-| **Firewalld en conflit** avec `networking.firewall` | On conserve le pare-feu natif NixOS (`nftables`/`iptables`) et notre démon léger `cockpit-nixos-firewall-bridge` expose `org.fedoraproject.FirewallD1` sur D-Bus pour traduire chaque port/service vers `/etc/nixos/cockpit-managed.nix`. |
-| **Dérive réseau NetworkManager** | Un watcher `systemd.path` (`cockpit-nixos-net-intercept`) détecte les changements de profils NetworkManager, filtre les interfaces éphémères (`podman*`, `veth*`, `virbr*`), évite les boucles via sentinel + hash SHA-256, et écrit `networking.networkmanager.ensureProfiles.profiles` dans `cockpit-managed.nix`. |
-| **Risque de casser NixOS depuis l'UI** | `cockpit-nixos-ctl` valide strictement chaque champ (regex + `ipaddress` + préfixes de montage autorisés), verrouille par `flock`, sauvegarde `cockpit-managed.nix`, vérifie la syntaxe via `nix-instantiate --parse`, et **restaure automatiquement** le backup si `nixos-rebuild switch` échoue. |
-| **Découverte des plugins** dans le Nix store | `environment.pathsToLink = [ "/share/cockpit" ];` expose `cockpit-machines`, `cockpit-files`, `cockpit-podman` et notre `nixos-manager` dans `/run/current-system/sw/share/cockpit/`. |
-| **Permissions Sudo / Polkit** | `security.sudo.extraRules` n'accorde `NOPASSWD` **que** sur le binaire immuable `cockpit-nixos-ctl` (avec `NOSETENV`), et Polkit limite les autorisations `systemd1`, `NetworkManager`, `udisks2`, `libvirt` et `FirewallD1` au groupe `wheel`. |
-| **Ventilateur Steam Deck (`steamdeck_hwmon`)** | Le driver EC `steamdeck_hwmon` est hors-arbre du kernel mainline : import automatique de **Jovian-NixOS** (noyau Valve Neptune + `jupiter-fan-control`) avec mode serveur headless (`jovian.steam.enable = false`, anti-veille, `consoleblank=60` anti burn-in OLED). |
-| **Mises à jour auto + Health-Checker (style openSUSE MicroOS)** | `system.autoUpgrade` quotidien avec fenêtre de reboot (`03:00`–`05:30`), protégé par 3 niveaux : **watchdog matériel + `panic=10`**, **`systemd-boot` `bootCounting` + `systemd-bless-boot`** (si dispo), et notre **`nixos-health-checker`** en 3 phases (`nixos-boot-counter` précoce, sondes système avant `boot-complete.target`, et `--live-check` post-upgrade à chaud) déclenchant un **rollback automatique** après 3 démarrages/échecs consécutifs sur une nouvelle génération. |
+Un module NixOS et un plugin **Cockpit** qui rendent l'écosystème Cockpit (`cockpit-machines`, `cockpit-files`, `cockpit-podman`, réseau, pare-feu, paquets et générations) **100 % natif et déclaratif** sur NixOS, accompagné d'un **health-checker avec rollback automatique** (inspiré d'openSUSE MicroOS) et d'un profil clé en main pour transformer un **Steam Deck** (ou n'importe quel serveur NixOS) en serveur domestique autonome.
 
 ---
 
-## 2. Arborescence du Projet (prêt pour GitHub)
+## Fonctionnalités
 
-```text
-NixOS Server/
-├── default.nix                             # Point d'entrée GitHub (importe profiles/steamdeck-server.nix)
-├── flake.nix                               # Export Flakes (nixosModules.default & nixosModules.cockpit-nixos)
-├── profiles/
-│   └── steamdeck-server.nix                # Profil serveur complet (Cockpit + Podman + KVM + Steam Deck + MicroOS HC)
-├── deploy/
-│   └── steamdeck-server.nix                # Exemple minimal (15 lignes) à copier sur le serveur
-├── plugin/                                 # Frontend du plugin Cockpit (CSP strict, zéro JS inline)
-│   ├── manifest.json
-│   ├── index.html
-│   ├── style.css
-│   └── app.js
-├── backend/                                # Services & CLI Python 3
-│   ├── cockpit-nixos-ctl.py                # CLI transactionnel (générations, rollback, GC, state -> Nix)
-│   ├── cockpit-nixos-net-intercept.py      # Intercepteur NetworkManager -> cockpit-managed.nix
-│   ├── cockpit-nixos-firewall-bridge.py    # Bridge D-Bus FirewallD1 -> networking.firewall
-│   └── nixos-health-checker.py             # Health-checker boot & auto-rollback (style openSUSE MicroOS)
-└── nixos/                                  # Module générique réutilisable (hors Steam Deck)
-    ├── cockpit-nixos-module.nix            # Module réutilisable (services.cockpit-nixos.*)
-    └── configuration.nix                   # Exemple complet de /etc/nixos/configuration.nix
-```
+- **Plugin Cockpit « NixOS Déclaratif »** intégré directement dans la barre latérale de Cockpit :
+  - Liste des générations NixOS, bascule atomique, **Rollback** en un clic, **`nix-collect-garbage -d`** et optimisation du store (`nix-store --optimise`) avec logs en temps réel.
+  - Gestion déclarative des **paquets Nix** (recherche dans `nixpkgs`, ajout/suppression), du **pare-feu**, du **réseau** et des **montages `fileSystems`** pour `cockpit-files`.
+  - Suivi en direct de l'état du **Health-Checker**, des mises à jour automatiques et de la **télémétrie matérielle (`hwmon` / ventilateur & APU)**.
+- **Interception déclarative vers `/etc/nixos/cockpit-managed.nix`** :
+  - **Réseau** : surveille les modifications faites dans l'onglet natif *Networking* de Cockpit (`NetworkManager`) et les synchronise dans `networking.networkmanager.ensureProfiles.profiles` (avec debounce, anti-boucle SHA-256 et filtrage des interfaces éphémères Podman/Libvirt).
+  - **Pare-feu** : expose un bridge D-Bus léger (`org.fedoraproject.FirewallD1`) permettant d'utiliser l'interface *Firewall* de Cockpit tout en conservant le pare-feu natif NixOS (`networking.firewall`).
+  - **Paquets** : masque l'onglet `PackageKit` (incompatible NixOS) via `override.json` et centralise toute installation dans `environment.systemPackages`.
+- **Écosystème virtualisation & stockage complet** :
+  - **Podman** (`cockpit-podman`, `dockerCompat`, `dockerSocket`, DNS interne, `podman-compose`, `autoPrune`).
+  - **KVM / QEMU** (`cockpit-machines`, `libvirtd`, `libvirt-dbus`, `virt-manager`, `swtpm`).
+  - **Fichiers & disques** (`cockpit-files`, `udisks2`, répertoires `/srv/data`, `/srv/shares`, `/mnt/storage` prêts à l'emploi).
+- **Mises à jour automatiques & Auto-Rollback (style openSUSE MicroOS)** :
+  - Mises à jour nocturnes (`system.autoUpgrade`) avec fenêtre de redémarrage dédiée (`03:00`–`05:30`) et `nix.gc` conservant les 14 derniers jours.
+  - Protection 3 niveaux : watchdog matériel + `panic=10`, `systemd-boot` `bootCounting` (si disponible), compteur précoce anti boot-loop et sondes de santé bloquant `boot-complete.target`. En cas d'échecs répétés sur une nouvelle génération, le serveur revient automatiquement sur la dernière génération saine (`last_good_gen`).
+- **Profil Serveur Steam Deck (via Jovian-NixOS)** :
+  - Noyau Valve Neptune incluant les drivers `steamdeck` / `steamdeck_hwmon` et la gestion du ventilateur `jupiter-fan-control` (plus une courbe ventilateur serveur 24/7 optionnelle).
+  - Mode serveur headless (`jovian.steam.enable = false`, anti-veille, extinction d'écran `consoleblank=60` anti burn-in OLED).
 
 ---
 
-## 3. Déploiement Express depuis GitHub (1 ligne dans `configuration.nix`)
+## Démarrage rapide
 
-### Étape 1 — Pousser le projet sur le dépôt GitHub
-```bash
-cd "/home/benjamin/Documents/NixOS Server"
-git init -b main
-git add .
-git commit -m "Initial commit: NixOS Steam Deck Server + Cockpit Déclaratif + MicroOS Health-Checker"
-git remote add origin https://github.com/benjamin7490/nixos-steamdeck-cockpit.git
-git push -u origin main
-```
-
-### Étape 2 — Sur le Steam Deck : passer sur `nixos-unstable`
+### Prérequis recommandé
+Utilisez le canal **`nixos-unstable`** (recommandé pour `Jovian-NixOS` et `cockpit-files`) :
 ```bash
 sudo nix-channel --add https://nixos.org/channels/nixos-unstable nixos
 sudo nix-channel --update
 ```
 
-### Étape 3 — Importer directement votre dépôt GitHub dans `/etc/nixos/configuration.nix`
-Ajoutez simplement **une seule ligne** dans `imports` de votre `/etc/nixos/configuration.nix` :
+### Option A — Profil complet Serveur Steam Deck (1 ligne dans `configuration.nix`)
+
+Ajoutez cet import dans votre `/etc/nixos/configuration.nix` existant :
 
 ```nix
 { config, pkgs, ... }:
+
 {
   imports = [
     ./hardware-configuration.nix
     (builtins.fetchTarball "https://github.com/benjamin7490/nixos-steamdeck-cockpit/archive/main.tar.gz")
   ];
 
-  # Optionnel : donner automatiquement les groupes admin Cockpit à votre utilisateur
-  services.steamdeck-server.adminUsers = [ "benjamin" ];
+  # Donne automatiquement les groupes wheel, networkmanager et libvirtd à votre utilisateur
+  services.steamdeck-server.adminUsers = [ "<votre-utilisateur>" ];
 
-  # Optionnel : courbe ventilateur serveur plus fraîche (sinon jupiter-fan-control de Valve)
+  # Optionnel : activer SSH si besoin
+  # services.openssh.enable = true;
+
+  # Optionnel : courbe ventilateur serveur 24/7 plus fraîche que jupiter-fan-control
   # services.steamdeck-server.enableCustomFanCurve = true;
 }
 ```
-*(Pour un serveur NixOS classique **sans** drivers Steam Deck / Jovian, importez plutôt `((builtins.fetchTarball "https://github.com/benjamin7490/nixos-steamdeck-cockpit/archive/main.tar.gz") + "/nixos/cockpit-nixos-module.nix")`.)*
 
-### Étape 4 — Déployer et redémarrer sur le noyau Steam Deck Neptune
+Appliquez la configuration puis redémarrez une fois pour activer le noyau Valve Neptune (`steamdeck_hwmon`) :
 ```bash
 sudo nixos-rebuild switch
 sudo reboot
 ```
-> Chaque nuit à `03:30`, `system.autoUpgrade` tirera automatiquement vos derniers commits depuis GitHub + les mises à jour NixOS, testera le démarrage via `nixos-health-checker`, et effectuera un rollback automatique si quelque chose échoue.
 
-### Étape 5 — Vérifier & Ouvrir Cockpit
+### Option B — Serveur NixOS générique (sans drivers Steam Deck / Jovian)
+
+Importez uniquement le module générique `nixos/cockpit-nixos-module.nix` :
+
+```nix
+{ config, pkgs, lib, ... }:
+
+{
+  imports = [
+    ./hardware-configuration.nix
+    ((builtins.fetchTarball "https://github.com/benjamin7490/nixos-steamdeck-cockpit/archive/main.tar.gz") + "/nixos/cockpit-nixos-module.nix")
+  ] ++ lib.optional (builtins.pathExists /etc/nixos/cockpit-managed.nix) /etc/nixos/cockpit-managed.nix;
+
+  services.cockpit-nixos.enable = true;
+
+  users.users.<votre-utilisateur>.extraGroups = [ "wheel" "networkmanager" "libvirtd" ];
+}
+```
+
+### Option C — Avec Nix Flakes
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixos-steamdeck-cockpit.url = "github:benjamin7490/nixos-steamdeck-cockpit";
+  };
+
+  outputs = { nixpkgs, nixos-steamdeck-cockpit, ... }: {
+    nixosConfigurations.my-server = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        ./configuration.nix
+        # Module générique (100 % pur) :
+        nixos-steamdeck-cockpit.nixosModules.cockpit-nixos
+        # Ou profil complet Steam Deck : nixos-steamdeck-cockpit.nixosModules.default
+      ];
+    };
+  };
+}
+```
+
+### Accès à l'interface web
+Ouvrez `https://<IP-OU-HOSTNAME>:9090`, connectez-vous avec votre compte NixOS, cliquez sur **« Activer l'accès administrateur »** dans la barre supérieure, puis ouvrez **NixOS Déclaratif**.
+
+---
+
+## Options de configuration
+
+Toutes les options du profil utilisent `lib.mkDefault` : vous pouvez les surcharger directement dans `/etc/nixos/configuration.nix` sans `lib.mkForce`.
+
+| Option | Défaut | Description |
+| :--- | :--- | :--- |
+| `services.cockpit-nixos.enable` | `true` *(profil)* / `false` *(module)* | Active Cockpit et le plugin NixOS Déclaratif |
+| `services.cockpit-nixos.port` | `9090` | Port TCP HTTPS de Cockpit |
+| `services.cockpit-nixos.allowedOrigins` | `[ ]` | Origines supplémentaires (`WebService.Origins`) pour reverse proxy |
+| `services.cockpit-nixos.enableMachines` | `true` | Active `cockpit-machines` + KVM/QEMU + `libvirtd` + `libvirt-dbus` |
+| `services.cockpit-nixos.enablePodman` | `true` | Active `cockpit-podman` + Podman + `dockerCompat` + `dockerSocket` |
+| `services.cockpit-nixos.enableFiles` | `true` | Active `cockpit-files` + `udisks2` + dossiers `/srv` et `/mnt` |
+| `services.cockpit-nixos.enableNetworkInterception` | `true` | Synchronise NetworkManager vers `/etc/nixos/cockpit-managed.nix` |
+| `services.cockpit-nixos.enableFirewallBridge` | `true` | Bridge D-Bus `org.fedoraproject.FirewallD1` → `networking.firewall` |
+| `services.cockpit-nixos.enableAutoUpgrade` | `true` | Active `system.autoUpgrade` + `nix.gc` hebdomadaire (14 j) |
+| `services.cockpit-nixos.autoUpgradeDates` | `"03:30"` | Planification `OnCalendar` des mises à jour automatiques |
+| `services.cockpit-nixos.autoUpgradeRebootWindow` | `{ lower = "03:00"; upper = "05:30"; }` | Plage horaire autorisée pour les redémarrages automatiques |
+| `services.cockpit-nixos.enableHealthChecker` | `true` | Active la vérification au démarrage et le rollback automatique |
+| `services.cockpit-nixos.maxBootAttempts` | `3` | Nombre d'échecs/reboots avant rollback automatique |
+| `services.steamdeck-server.adminUsers` | `[ ]` | Utilisateurs recevant `wheel`, `networkmanager` (et `libvirtd`) |
+| `services.steamdeck-server.enableCustomFanCurve` | `false` | Remplace `jupiter-fan-control` par une courbe serveur 24/7 |
+
+---
+
+## Architecture
+
+```mermaid
+flowchart TB
+  subgraph UI["Interface Web Cockpit (:9090 HTTPS)"]
+    P1["Networking (natif)"]
+    P2["Firewall (natif)"]
+    P3["cockpit-machines (KVM/QEMU)"]
+    P4["cockpit-podman (Conteneurs)"]
+    P5["cockpit-files (Fichiers)"]
+    P6["NixOS Déclaratif\n(Générations, Rollback, GC, Paquets,\nRéseau/FW, Montages, Health & Capteurs)"]
+    PK["PackageKit masqué\n(packagekit.override.json)"]
+  end
+
+  subgraph INTERCEPT["Couche d'Interception & Bridges"]
+    NM["NetworkManager"]
+    NETW["cockpit-nixos-net-intercept\n(systemd.path + debounce 3s + SHA-256)"]
+    FWB["cockpit-nixos-firewall-bridge\n(D-Bus FirewallD1 -> NixOS)"]
+    CTL["cockpit-nixos-ctl\n(CLI transactionnel, flock, validation)"]
+  end
+
+  subgraph NIX["Système NixOS Déclaratif"]
+    STATE["/var/lib/cockpit-nixos/state.json\n+ backups horodatés"]
+    MANAGED["/etc/nixos/cockpit-managed.nix"]
+    REBUILD["nix-instantiate --parse\n-> nixos-rebuild switch\n(rollback auto si échec)"]
+    HC["nixos-health-checker\n(boot-counter + boot-complete + live-check)"]
+  end
+
+  P1 --> NM --> NETW --> CTL
+  P2 --> FWB --> CTL
+  P6 -- "cockpit.spawn (superuser)" --> CTL
+  CTL --> STATE
+  CTL --> MANAGED --> REBUILD --> HC
+```
+
+---
+
+## Health-Checker & Auto-Rollback (style openSUSE MicroOS)
+
+1. **Protection matérielle & boot précoce** : `panic=10 oops=panic`, watchdog matériel systemd (`RuntimeWatchdogSec = 30s`, `RebootWatchdogSec = 2min`), `boot.loader.systemd-boot.bootCounting` (si disponible dans `nixpkgs`), et service précoce `nixos-boot-counter.service` (dès `local-fs.target`, compatible `systemd-boot` et `GRUB`) avec écriture atomique + `fsync`.
+2. **Sondes de santé (`nixos-health-checker.service`, requis par `boot-complete.target`)** : vérifie l'accès en écriture de la racine et `/nix/store`, les unités critiques (`dbus`, `NetworkManager`, `cockpit.socket`, `sshd`, `podman.socket`, `libvirtd`), la présence d'une IP LAN, l'écoute du port Cockpit et la sécurité thermique (`< 95 °C`).
+   - **Succès** → enregistre la génération comme `last_good_gen`, remet le compteur à `0` et valide `boot-complete.target`.
+   - **Échec sur une nouvelle génération** → retente jusqu'à `maxBootAttempts` fois, puis déclenche un **rollback atomique automatique** (`nix-env --switch-generation` + `switch-to-configuration boot` + reboot) et met la génération défectueuse en liste noire.
+   - **Garde-fou anti-boucle** → si la machine tourne déjà sur `last_good_gen` (ex. panne de routeur LAN), elle passe en état `DEGRADED_ON_LAST_GOOD` sans jamais relancer de rollback infini.
+3. **Post-upgrade à chaud (`--live-check`)** : en `ExecStartPost` de `nixos-upgrade.service` (uniquement si aucun redémarrage noyau n'est en cours), vérifie les services et lance `nixos-rebuild switch --rollback` en cas de régression.
+
+---
+
+## Sécurité
+
+- **Validation stricte côté backend** : chaque nom de paquet, port, interface, IP, nom d'hôte et point de montage (limité à `/mnt/`, `/srv/`, `/media/`, `/data/`, `/var/lib/libvirt/images`, `/var/lib/containers`) est validé par allowlist avant toute écriture. Les profils Wi-Fi (`802-11-wireless`) sont exclus de la synchronisation NetworkManager pour ne jamais exposer de mot de passe PSK dans `/etc/nixos/cockpit-managed.nix`.
+- **Transactions atomiques** : verrou `flock`, sauvegarde préalable, vérification `nix-instantiate --parse` et restauration automatique en cas d'échec de `nixos-rebuild switch`.
+- **Moindre privilège** : `security.sudo` restreint `NOPASSWD`/`NOSETENV` uniquement au binaire immuable `cockpit-nixos-ctl`, `security.polkit.extraConfig` limite les droits au groupe `wheel`, et la policy D-Bus bloque toute modification pare-feu ou `reload` pour les utilisateurs non membres de `wheel`.
+
+---
+
+## Structure du dépôt
+
+```text
+.
+├── default.nix                             # Point d'entrée fetchTarball (profil Steam Deck)
+├── flake.nix                               # Export Flakes (default, steamdeck-server, cockpit-nixos)
+├── profiles/
+│   └── steamdeck-server.nix                # Profil complet Serveur Steam Deck (Jovian + Cockpit + HC)
+├── deploy/
+│   └── steamdeck-server.nix                # Exemple minimal d'import pour /etc/nixos/
+├── nixos/
+│   ├── cockpit-nixos-module.nix            # Module NixOS générique (services.cockpit-nixos.*)
+│   └── configuration.nix                   # Exemple complet de configuration.nix
+├── plugin/                                 # Frontend Cockpit (CSP strict, sans JS inline)
+│   ├── manifest.json
+│   ├── index.html
+│   ├── style.css
+│   └── app.js
+└── backend/                                # Services et CLI Python 3
+    ├── cockpit-nixos-ctl.py                # CLI privilégié transactionnel
+    ├── cockpit-nixos-net-intercept.py      # Intercepteur NetworkManager -> NixOS
+    ├── cockpit-nixos-firewall-bridge.py    # Bridge D-Bus FirewallD1 -> networking.firewall
+    └── nixos-health-checker.py             # Health-checker & auto-rollback MicroOS-style
+```
+
+---
+
+## Commandes de diagnostic utiles
+
 ```bash
-# Vérifier les services, le health-checker, les MAJ auto et le ventilateur Steam Deck
-systemctl status cockpit.socket podman.socket libvirtd jupiter-fan-control cockpit-nixos-firewall-bridge nixos-health-checker nixos-upgrade.timer
+# État global des services
+systemctl status cockpit.socket podman.socket libvirtd cockpit-nixos-firewall-bridge nixos-health-checker nixos-upgrade.timer
+
+# Tester manuellement les sondes de santé
 sudo nixos-health-checker --check-only
+cat /var/lib/nixos-health-checker/state.json
+
+# Vérifier les capteurs et le ventilateur Steam Deck
+systemctl status jupiter-fan-control
 sensors | grep -A5 steamdeck_hwmon
 ```
-Accédez ensuite depuis votre navigateur à :
-`https://<IP-OU-HOSTNAME-DE-VOTRE-SERVEUR>:9090`
-
-Connectez-vous avec votre compte NixOS, cliquez sur **« Activer l'accès administrateur »** dans la barre supérieure, et ouvrez l'onglet **NixOS Déclaratif**.
-
----
-
-## 4. Fonctionnement du Health-Checker & Auto-Rollback (style openSUSE MicroOS)
-
-1. **Mises à jour automatiques (`system.autoUpgrade`)** : chaque nuit à `03:30` (+ jitter aléatoire de 30 min), le système met à jour le canal NixOS et construit la nouvelle génération. Si le noyau/initrd/systemd change, le serveur redémarre automatiquement uniquement dans la fenêtre `03:00`–`05:30` ; sinon la bascule se fait à chaud. Un `nix.gc` hebdomadaire nettoie les générations de plus de 14 jours afin de toujours conserver un point de rollback valide.
-2. **Protection contre les Kernel Panics / Freezes** : `boot.kernelParams = [ "panic=10" "oops=panic" ]` + Watchdog matériel (`RuntimeWatchdogSec = 30s`, `RebootWatchdogSec = 2min`) forcent le redémarrage si le système se fige. Si `systemd-boot` dispose de `bootCounting` sur votre canal NixOS, le compteur natif EFI `+3` + `systemd-bless-boot` est activé automatiquement.
-3. **Compteur précoce (`nixos-boot-counter.service`)** : exécuté dès `local-fs.target`, incrémente de façon atomique (`fsync`) le compteur de tentatives dans `/var/lib/nixos-health-checker/state.json` dès qu'une génération diffère de `last_good_gen`. Si le serveur redémarre en boucle plus de **3 fois** (`maxBootAttempts = 3`), il bascule immédiatement sur `last_good_gen` et met à jour le bootloader (compatible `systemd-boot` **et** `GRUB`).
-4. **Sondes de santé complètes (`nixos-health-checker.service`, bloquant `boot-complete.target`)** : vérifie le système de fichiers en lecture-écriture, les services critiques (`dbus`, `NetworkManager`, `cockpit.socket`, `sshd`, `podman.socket`, `libvirtd`), la présence d'une IP LAN, l'écoute du port Cockpit `9090` et l'absence de surchauffe (`< 95 °C`).
-   - **Succès** → enregistre `last_good_gen`, remet le compteur à `0` et atteint `boot-complete.target` (bénédiction du boot).
-   - **Échec sur une nouvelle génération** → retente après reboot jusqu'à 3 fois, puis **rollback atomique automatique** vers `last_good_gen` et mise en liste noire de la génération cassée.
-   - **Garde-fou anti-boucle** → si le serveur tourne déjà sur `last_good_gen` (ex. box Internet débranchée), il passe en état `DEGRADED_ON_LAST_GOOD` sans jamais déclencher de rollback infini.
-5. **Post-upgrade à chaud (`--live-check`)** : lorsqu'une mise à jour auto s'applique sans reboot, les sondes s'exécutent immédiatement en `ExecStartPost` et lancent `nixos-rebuild switch --rollback` en cas d'anomalie.
-
----
-
-## 4. Déploiement Modulaire (Alternative Git / Développement)
-
-Si vous souhaitez faire évoluer le plugin séparément :
-```bash
-sudo mkdir -p /etc/nixos/cockpit-nixos
-sudo cp -r plugin backend nixos/cockpit-nixos-module.nix /etc/nixos/cockpit-nixos/
-```
-Puis importez `/etc/nixos/cockpit-nixos/cockpit-nixos-module.nix` (et conditionnellement `/etc/nixos/cockpit-managed.nix`) dans votre `/etc/nixos/configuration.nix` en vous basant sur `nixos/configuration.nix`.
