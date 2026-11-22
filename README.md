@@ -20,10 +20,10 @@ A NixOS module and **Cockpit** integration that make Cockpit's **real built-in m
   - **Podman, KVM & Files**: turnkey `cockpit-podman` (`dockerCompat`, `dockerSocket`, internal DNS, weekly `autoPrune`), `cockpit-machines` (`libvirtd`, `libvirt-dbus`, `virt-manager`, `swtpm`), and `cockpit-files` (`/srv/data`, `/srv/shares`, `/mnt/storage`).
 - **Two Thin Complementary Sidebar Tabs (Exact Cockpit PatternFly 6 CSS + Light/Dark Sync)**:
   - **Paquets**: declarative `nixpkgs` search and `environment.systemPackages` add/remove UI complementing Cockpit's native *Software Updates* tab.
-  - **Générations**: NixOS equivalent of Fedora CoreOS's `cockpit-ostree` / openSUSE MicroOS's `cockpit-tukit` — list and switch NixOS generations atomically, **Roll back** with one click, run **`nix-collect-garbage -d`**, optimize the Nix store, inspect the **MicroOS-style Health-Checker**, monitor live **`hwmon` hardware telemetry**, and inspect `/etc/nixos/cockpit-managed.nix`.
-- **Automatic Upgrades & Boot Health-Checker (openSUSE MicroOS–style)**:
+  - **Générations**: NixOS equivalent of Fedora CoreOS's `cockpit-ostree` / openSUSE MicroOS's `cockpit-tukit` — list and switch NixOS generations atomically, **Roll back** with one click, run **`nix-collect-garbage -d`**, optimize the Nix store, monitor live **`hwmon` hardware telemetry**, and inspect `/etc/nixos/cockpit-managed.nix`.
+- **Automatic Upgrades & Background Boot Health-Checker (openSUSE MicroOS–style)**:
   - Nightly `system.autoUpgrade` with a configurable reboot window (`03:00`–`05:30`) and weekly `nix.gc` retaining the last 14 days of generations.
-  - Three-layer protection: hardware watchdog + `panic=10`, native `systemd-boot` `bootCounting` (when available in `nixpkgs`), early boot-loop counter, and health probes gating `boot-complete.target`. Repeated boot failures on a new generation trigger an **automatic rollback** to the last known-good generation.
+  - Pure background systemd protection (no extra UI clutter; inspect logs natively in Cockpit *Logs* / *Services* or `journalctl -u nixos-health-checker`): hardware watchdog + `panic=10`, native `systemd-boot` `bootCounting` (when available in `nixpkgs`), early boot-loop counter, and health probes gating `boot-complete.target`. Repeated boot failures on a new generation trigger an **automatic rollback** to the last known-good generation.
 - **Steam Deck Headless Server Profile (via Jovian-NixOS)**:
   - Valve Neptune kernel with `steamdeck` / `steamdeck_hwmon` drivers and `jupiter-fan-control` (plus an optional 24/7 server fan curve daemon).
   - Headless tuning: Steam/Gamescope disabled, sleep/suspend disabled, and `consoleblank=60` for OLED burn-in protection.
@@ -216,7 +216,7 @@ flowchart TB
 ├── plugin/                                 # Cockpit frontend (exact Cockpit PatternFly 6 CSS, strict CSP)
 │   ├── manifest.json                       # Registers 2 complementary sidebar entries (Paquets, Générations)
 │   ├── packages.html                       # Declarative nixpkgs search & environment.systemPackages UI
-│   ├── generations.html                    # Generations, Rollback, GC, Health-Checker, hwmon & nix preview
+│   ├── generations.html                    # Generations, Rollback, GC, hwmon telemetry & nix preview
 │   ├── style.css
 │   └── app.js
 └── backend/                                # Python 3 CLI, D-Bus bridges & watchers

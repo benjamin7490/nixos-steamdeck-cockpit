@@ -377,40 +377,6 @@ def read_hwmon_telemetry() -> dict:
     }
 
 
-def read_health_status() -> dict:
-    hc_file = Path("/var/lib/nixos-health-checker/state.json")
-    data = {
-        "status": "NOT_CONFIGURED",
-        "last_good_gen": None,
-        "unhealthy_boot_attempts": 0,
-        "max_boot_attempts": 3,
-        "last_check_time": "",
-        "probes": [],
-        "rollback_history": [],
-        "auto_upgrade_next": "",
-        "auto_upgrade_active": False,
-    }
-    if hc_file.exists():
-        try:
-            data.update(json.loads(hc_file.read_text(encoding="utf-8")))
-        except Exception:
-            pass
-    try:
-        res = subprocess.run(
-            ["systemctl", "show", "nixos-upgrade.timer", "--property=ActiveState,NextElapseUSecRealtime"],
-            capture_output=True,
-            text=True,
-        )
-        for line in res.stdout.splitlines():
-            if line.startswith("ActiveState="):
-                data["auto_upgrade_active"] = (line.split("=", 1)[1].strip() == "active")
-            elif line.startswith("NextElapseUSecRealtime="):
-                data["auto_upgrade_next"] = line.split("=", 1)[1].strip()
-    except Exception:
-        pass
-    return data
-
-
 def validate_package(pkg: str) -> str:
     pkg = pkg.strip()
     if not PKG_RE.match(pkg):
@@ -609,7 +575,6 @@ def main() -> int:
                 "generations": list_generations(),
                 "managed_nix": managed,
                 "telemetry": read_hwmon_telemetry(),
-                "health": read_health_status(),
             }))
             return 0
 
@@ -780,16 +745,6 @@ def main() -> int:
         if cmd == "optimise-store":
             ensure_root()
             with_lock(lambda: stream_cmd(["nix-store", "--optimise"]))
-            return 0
-
-        if cmd == "health-check":
-            ensure_root()
-            stream_cmd(["/run/current-system/sw/bin/nixos-health-checker", "--check-only", "--update-probes"], check=False)
-            return 0
-
-        if cmd == "trigger-upgrade":
-            ensure_root()
-            with_lock(lambda: stream_cmd(["systemctl", "start", "--wait", "nixos-upgrade.service"]))
             return 0
 
         print("Commande inconnue : " + cmd, file=sys.stderr)

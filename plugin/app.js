@@ -101,7 +101,7 @@
   function setBusy(state) {
     busy = state;
     var buttons = document.querySelectorAll(
-      "button[type='submit'], .admin-only, #btn-rebuild-now, #btn-dry-build, #btn-rollback, #btn-gc, #btn-optimise, #btn-sync-nm, #btn-health-check, #btn-trigger-upgrade"
+      "button[type='submit'], .admin-only, #btn-rebuild-now, #btn-dry-build, #btn-rollback, #btn-gc, #btn-optimise, #btn-sync-nm"
     );
     for (var i = 0; i < buttons.length; i++) {
       buttons[i].disabled = state || !isAdmin;
@@ -227,6 +227,9 @@
       tbody.appendChild(tr);
     }
 
+    if ($("metric-gen-count")) {
+      $("metric-gen-count").textContent = String(gens.length);
+    }
     if (activeGen && $("metric-gen")) {
       $("metric-gen").textContent = "#" + String(activeGen.id);
       if ($("metric-gen-date")) {
@@ -426,67 +429,6 @@
     }
   }
 
-  function renderHealth(hc) {
-    var valEl = $("metric-health");
-    var subEl = $("metric-health-sub");
-    var infoEl = $("health-upgrade-info");
-    var grid = $("health-probes-grid");
-    var rbList = $("health-rollbacks-list");
-    if (!valEl && !grid) return;
-
-    if (!hc) {
-      if (valEl) valEl.textContent = "Inactif";
-      if (subEl) subEl.textContent = "Health-checker non configuré";
-      return;
-    }
-
-    var st = hc.status || "UNKNOWN";
-    if (valEl) valEl.textContent = st === "HEALTHY" ? "Sain (Bénie)" : st;
-    var lg = (hc.last_good_gen !== null && hc.last_good_gen !== undefined) ? ("#" + String(hc.last_good_gen)) : "--";
-    if (subEl) {
-      subEl.textContent = "Last Good : " + lg + " • Essais : " + String(hc.unhealthy_boot_attempts || 0) + "/" + String(hc.max_boot_attempts || 3);
-    }
-    if (infoEl) {
-      var upgTxt = hc.auto_upgrade_active ? ("Auto-MAJ active (prochaine : " + (hc.auto_upgrade_next || "planifiée") + ")") : "Auto-MAJ inactive";
-      infoEl.textContent = upgTxt + (hc.last_check_time ? (" — Dernier check : " + hc.last_check_time) : "");
-    }
-
-    if (grid) {
-      grid.innerHTML = "";
-      var probes = hc.probes || [];
-      if (probes.length === 0) {
-        grid.innerHTML = '<div class="nixos-muted">En attente du premier health-check (cliquez sur Tester les sondes).</div>';
-      } else {
-        for (var i = 0; i < probes.length; i++) {
-          var p = probes[i];
-          var item = document.createElement("div");
-          item.className = "nixos-probe-item";
-          item.appendChild(makeLabel(p.name, p.ok ? "pf-m-green" : "pf-m-red"));
-          var detail = document.createElement("div");
-          detail.className = "nixos-muted";
-          detail.textContent = p.detail || "";
-          item.appendChild(detail);
-          grid.appendChild(item);
-        }
-      }
-    }
-
-    if (rbList) {
-      rbList.innerHTML = "";
-      var hist = hc.rollback_history || [];
-      if (hist.length === 0) {
-        rbList.innerHTML = '<li class="nixos-muted">Aucun rollback automatique déclenché.</li>';
-      } else {
-        for (var j = hist.length - 1; j >= 0; j--) {
-          var ev = hist[j];
-          var li = document.createElement("li");
-          li.textContent = ev.time + " : #" + String(ev.from_gen) + " -> #" + String(ev.to_gen) + " (" + (ev.reason || "") + ")";
-          rbList.appendChild(li);
-        }
-      }
-    }
-  }
-
   function refreshAll() {
     return spawnCtlRead(["status"]).then(function (raw) {
       var data = JSON.parse(raw);
@@ -495,7 +437,6 @@
       renderNetworkAndFirewall(data.state);
       renderMounts(data.state.mounts);
       renderTelemetry(data.telemetry);
-      renderHealth(data.health);
       if ($("nix-preview")) {
         $("nix-preview").textContent = data.managed_nix || "# Fichier non généré";
       }
@@ -540,16 +481,6 @@
 
     on("btn-optimise", "click", function () {
       spawnCtlWrite(["optimise-store"], "Optimisation Nix Store (déduplication hardlinks)");
-    });
-
-    on("btn-health-check", "click", function () {
-      spawnCtlWrite(["health-check"], "Exécution manuelle du Health-Checker NixOS");
-    });
-
-    on("btn-trigger-upgrade", "click", function () {
-      if (window.confirm("Déclencher immédiatement nixos-upgrade.service (mise à jour automatique du canal & rebuild) ?")) {
-        spawnCtlWrite(["trigger-upgrade"], "Mise à jour automatique NixOS (nixos-upgrade)");
-      }
     });
 
     on("btn-sync-nm", "click", function () {
