@@ -84,6 +84,12 @@ body {
   gap: var(--pf-t--global--spacer--md, 1rem);
 }
 
+.nixos-auto-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--pf-t--global--spacer--lg, 1.5rem);
+}
+
 .nixos-inline-form {
   display: flex;
   flex-wrap: wrap;

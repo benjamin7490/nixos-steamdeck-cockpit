@@ -88,15 +88,15 @@
             <form id="form-automation">
               <div class="pf-v6-c-card__header">
                 <div class="pf-v6-c-card__title">
-                  <h2 class="pf-v6-c-title pf-m-lg">Automatisation &amp; Optimisation du Store</h2>
-                  <p class="nixos-muted">Configuration déclarative de <code>system.autoUpgrade</code>, <code>nix.settings.auto-optimise-store</code> et <code>nix.optimise</code>.</p>
+                  <h2 class="pf-v6-c-title pf-m-lg">Automatisation &amp; Maintenance du Store</h2>
+                  <p class="nixos-muted">Configuration déclarative de <code>system.autoUpgrade</code>, <code>nix.gc</code>, <code>nix.settings.auto-optimise-store</code> et <code>nix.optimise</code>.</p>
                 </div>
                 <div class="pf-v6-c-card__actions">
                   <button id="btn-save-automation" class="pf-v6-c-button pf-m-primary pf-m-small" type="submit">Enregistrer et appliquer</button>
                 </div>
               </div>
               <div class="pf-v6-c-card__body">
-                <div class="nixos-split-grid">
+                <div class="nixos-auto-grid">
                   <div class="nixos-stack">
                     <div class="nixos-actions">
                       <h3 class="pf-v6-c-title pf-m-md">Mises à jour automatiques</h3>
@@ -141,6 +141,46 @@
                           <input id="auto-upg-win-upper" type="time" value="05:30">
                         </span>
                       </div>
+                    </div>
+                  </div>
+
+                  <div class="nixos-stack">
+                    <div class="nixos-actions">
+                      <h3 class="pf-v6-c-title pf-m-md">Nettoyage automatique (Garbage Collect)</h3>
+                      <span id="gc-auto-badge" class="pf-v6-c-label"><span class="pf-v6-c-label__content">--</span></span>
+                    </div>
+                    <div id="gc-timer-next" class="nixos-muted">Timer nix-gc.timer : --</div>
+
+                    <label class="nixos-check-row">
+                      <input id="gc-auto-enable" type="checkbox">
+                      <span>Activer le nettoyage automatique (<code>nix.gc.automatic</code>)</span>
+                    </label>
+
+                    <div class="nixos-field">
+                      <label for="gc-auto-dates" class="nixos-field-label">Planification (<code>OnCalendar</code>)</label>
+                      <span class="pf-v6-c-form-control">
+                        <input id="gc-auto-dates" type="text" list="gc-presets" placeholder="ex : weekly, daily, Sun 04:00" required>
+                      </span>
+                      <datalist id="gc-presets">
+                        <option value="weekly"></option>
+                        <option value="daily"></option>
+                        <option value="monthly"></option>
+                        <option value="Sun 04:00"></option>
+                      </datalist>
+                    </div>
+
+                    <div class="nixos-field">
+                      <label for="gc-retention" class="nixos-field-label">Rétention des anciennes générations</label>
+                      <span class="pf-v6-c-form-control">
+                        <select id="gc-retention">
+                          <option value="7d">Conserver 7 jours (--delete-older-than 7d)</option>
+                          <option value="14d" selected>Conserver 14 jours (--delete-older-than 14d)</option>
+                          <option value="30d">Conserver 30 jours (--delete-older-than 30d)</option>
+                          <option value="60d">Conserver 60 jours (--delete-older-than 60d)</option>
+                          <option value="90d">Conserver 90 jours (--delete-older-than 90d)</option>
+                          <option value="all">Tout supprimer sauf l'active (--delete-old)</option>
+                        </select>
+                      </span>
                     </div>
                   </div>
 

@@ -462,6 +462,9 @@
     var auDates = $("auto-upg-dates");
     var winLow = $("auto-upg-win-lower");
     var winUp = $("auto-upg-win-upper");
+    var gcEn = $("gc-auto-enable");
+    var gcDates = $("gc-auto-dates");
+    var gcRet = $("gc-retention");
     var optPer = $("opt-periodic-enable");
     var optDates = $("opt-periodic-dates");
 
@@ -470,6 +473,8 @@
     var winDisabled = !auEn || !auEn.checked || !auRb || !auRb.checked;
     if (winLow) winLow.disabled = winDisabled;
     if (winUp) winUp.disabled = winDisabled;
+    if (gcDates && gcEn) gcDates.disabled = !gcEn.checked;
+    if (gcRet && gcEn) gcRet.disabled = !gcEn.checked;
     if (optDates && optPer) optDates.disabled = !optPer.checked;
   }
 
@@ -477,6 +482,7 @@
     if (!auto || !$("form-automation")) return;
     var au = auto.autoUpgrade || {};
     var so = auto.storeOptimise || {};
+    var gc = auto.gc || {};
 
     setLabel("auto-upg-badge", au.liveActive ? "Actif" : "Inactif", au.liveActive ? "pf-m-green" : "");
     if ($("auto-upg-next")) {
@@ -489,6 +495,16 @@
     if ($("auto-upg-reboot")) $("auto-upg-reboot").checked = Boolean(au.allowReboot);
     if ($("auto-upg-win-lower")) $("auto-upg-win-lower").value = au.rebootLower || "03:00";
     if ($("auto-upg-win-upper")) $("auto-upg-win-upper").value = au.rebootUpper || "05:30";
+
+    setLabel("gc-auto-badge", gc.liveActive ? "Actif" : "Inactif", gc.liveActive ? "pf-m-green" : "");
+    if ($("gc-timer-next")) {
+      $("gc-timer-next").textContent = gc.liveActive
+        ? ("Prochaine exécution : " + (gc.nextElapse || "planifiée"))
+        : "Timer nix-gc.timer inactif";
+    }
+    if ($("gc-auto-enable")) $("gc-auto-enable").checked = Boolean(gc.automatic);
+    if ($("gc-auto-dates")) $("gc-auto-dates").value = gc.dates || "weekly";
+    if ($("gc-retention")) $("gc-retention").value = gc.retention || "14d";
 
     var optActive = Boolean(so.liveAutoOptimiseStore);
     setLabel("opt-store-badge", optActive ? "auto-optimise-store : Actif" : "auto-optimise-store : Inactif", optActive ? "pf-m-green" : "");
@@ -573,6 +589,7 @@
 
     on("auto-upg-enable", "change", updateAutomationFieldStates);
     on("auto-upg-reboot", "change", updateAutomationFieldStates);
+    on("gc-auto-enable", "change", updateAutomationFieldStates);
     on("opt-periodic-enable", "change", updateAutomationFieldStates);
 
     on("form-automation", "submit", function (e) {
@@ -585,6 +602,11 @@
           useRebootWindow: Boolean($("auto-upg-win-lower").value && $("auto-upg-win-upper").value),
           rebootLower: $("auto-upg-win-lower").value || "03:00",
           rebootUpper: $("auto-upg-win-upper").value || "05:30"
+        },
+        gc: {
+          automatic: $("gc-auto-enable").checked,
+          dates: $("gc-auto-dates").value.trim() || "weekly",
+          retention: $("gc-retention").value || "14d"
         },
         storeOptimise: {
           autoOptimiseStore: $("opt-auto-store").checked,

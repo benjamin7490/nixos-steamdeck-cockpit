@@ -217,6 +217,18 @@ def render_managed_nix(state: dict) -> str:
                     lines.append("    dates = lib.mkForce [ " + nix_str(so["periodicDates"]) + " ];")
                 lines.append("  };")
 
+        gc = auto.get("gc")
+        if isinstance(gc, dict) and "automatic" in gc:
+            lines.append("")
+            lines.append("  nix.gc = {")
+            lines.append("    automatic = lib.mkForce " + ("true" if gc.get("automatic") else "false") + ";")
+            if gc.get("dates"):
+                lines.append("    dates = lib.mkForce " + nix_str(gc["dates"]) + ";")
+            ret = gc.get("retention", "14d")
+            gc_opt = "--delete-old" if ret == "all" else ("--delete-older-than " + ret)
+            lines.append("    options = lib.mkForce " + nix_str(gc_opt) + ";")
+            lines.append("  };")
+
     lines.append("}")
     lines.append("")
     return "\n".join(lines)
@@ -815,11 +827,13 @@ def _detect_auto_optimise_store() -> bool:
 def read_automation_status(state: dict) -> dict:
     upg_timer = _query_timer("nixos-upgrade.timer")
     opt_timer = _query_timer("nix-optimise.timer")
+    gc_timer = _query_timer("nix-gc.timer")
     live_auto_opt = _detect_auto_optimise_store()
 
     saved = state.get("automation") if isinstance(state.get("automation"), dict) else {}
     saved_au = saved.get("autoUpgrade") if isinstance(saved.get("autoUpgrade"), dict) else {}
     saved_so = saved.get("storeOptimise") if isinstance(saved.get("storeOptimise"), dict) else {}
+    saved_gc = saved.get("gc") if isinstance(saved.get("gc"), dict) else {}
 
     return {
         "autoUpgrade": {
@@ -839,6 +853,13 @@ def read_automation_status(state: dict) -> dict:
             "periodicDates": saved_so.get("periodicDates") or opt_timer["calendar"] or "03:45",
             "livePeriodicActive": opt_timer["active"],
             "nextElapse": opt_timer["next"],
+        },
+        "gc": {
+            "automatic": bool(saved_gc["automatic"]) if "automatic" in saved_gc else gc_timer["active"],
+            "dates": saved_gc.get("dates") or gc_timer["calendar"] or "weekly",
+            "retention": saved_gc.get("retention") or "14d",
+            "liveActive": gc_timer["active"],
+            "nextElapse": gc_timer["next"],
         },
     }
 
@@ -879,6 +900,13 @@ def validate_automation(payload: dict) -> dict:
     so_periodic = bool(so_in.get("periodicEnable", False))
     so_dates = validate_calendar_expr(so_in.get("periodicDates", "03:45"), "nix.optimise.dates")
 
+    gc_in = payload.get("gc") or {}
+    gc_auto = bool(gc_in.get("automatic", False))
+    gc_dates = validate_calendar_expr(gc_in.get("dates", "weekly"), "nix.gc.dates")
+    gc_retention = str(gc_in.get("retention", "14d")).strip()
+    if gc_retention not in ("7d", "14d", "30d", "60d", "90d", "all"):
+        raise ValueError("Rétention GC invalide : " + gc_retention)
+
     return {
         "autoUpgrade": {
             "enable": au_enable,
@@ -892,6 +920,11 @@ def validate_automation(payload: dict) -> dict:
             "autoOptimiseStore": so_auto,
             "periodicEnable": so_periodic,
             "periodicDates": so_dates,
+        },
+        "gc": {
+            "automatic": gc_auto,
+            "dates": gc_dates,
+            "retention": gc_retention,
         },
     }
 
