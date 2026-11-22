@@ -2,12 +2,14 @@
 """
 cockpit-nixos-firewall-bridge : Bridge D-Bus complet (org.fedoraproject.FirewallD1)
 reliant directement l'interface native 'Réseau -> Pare-feu' de Cockpit au pare-feu
-déclaratif natif NixOS (/etc/nixos/cockpit-managed.nix -> networking.firewall).
+déclaratif natif NixOS (/etc/nixos/cockpit-managed.nix -> networking.firewall),
+tout en restant 100 % compatible avec libvirtd (zone 'libvirt' & interfaces virbr*).
 
 Expose :
-  - /org/fedoraproject/FirewallD1          (org.fedoraproject.FirewallD1 + .zone)
-  - /org/fedoraproject/FirewallD1/config   (org.fedoraproject.FirewallD1.config)
-  - /org/fedoraproject/FirewallD1/config/zone/0
+  - /org/fedoraproject/FirewallD1          (org.fedoraproject.FirewallD1 + .zone + .policy + .direct)
+  - /org/fedoraproject/FirewallD1/config   (org.fedoraproject.FirewallD1.config + Properties.FirewallBackend)
+  - /org/fedoraproject/FirewallD1/config/zone/0 (nixos)
+  - /org/fedoraproject/FirewallD1/config/zone/1 (libvirt)
   - /org/fedoraproject/FirewallD1/config/service/<idx>
 
 Enregistré avec l'alias systemd `firewalld.service` afin que le module natif
@@ -16,6 +18,7 @@ le démon impératif firewalld.
 """
 
 import json
+import shutil
 import subprocess
 import sys
 import threading
@@ -32,7 +35,8 @@ CTL_BIN = "/run/current-system/sw/bin/cockpit-nixos-ctl"
 BUS_NAME = "org.fedoraproject.FirewallD1"
 OBJ_PATH = "/org/fedoraproject/FirewallD1"
 CONFIG_PATH = "/org/fedoraproject/FirewallD1/config"
-ZONE_PATH = "/org/fedoraproject/FirewallD1/config/zone/0"
+ZONE_NIXOS_PATH = "/org/fedoraproject/FirewallD1/config/zone/0"
+ZONE_LIBVIRT_PATH = "/org/fedoraproject/FirewallD1/config/zone/1"
 
 # Catalogue des services standards reconnus par Cockpit Firewall UI
 KNOWN_SERVICES = {
@@ -57,6 +61,12 @@ KNOWN_SERVICES = {
 }
 
 SERVICE_LIST = sorted(KNOWN_SERVICES.keys())
+
+# Interfaces runtime attachées aux zones virtuelles (ex: virbr0 dans 'libvirt')
+RUNTIME_ZONE_INTERFACES = {
+    "libvirt": ["virbr0"],
+    "libvirt-routed": [],
+}
 
 
 def read_fw_state() -> dict:
@@ -119,7 +129,24 @@ def make_service_settings_v2(svc: str):
     }, signature="sv")
 
 
-def make_zone_settings_v1():
+def make_zone_settings_v1(zone_name: str = "nixos"):
+    if zone_name in ("libvirt", "libvirt-routed"):
+        ifaces = dbus.Array(RUNTIME_ZONE_INTERFACES.get(zone_name, []), signature="s")
+        return (
+            dbus.String("1.0"),
+            dbus.String(zone_name),
+            dbus.String("Zone virtuelle Libvirt (interfaces virbr* approuvées par NixOS)"),
+            dbus.Boolean(False),
+            dbus.String("ACCEPT"),
+            dbus.Array([], signature="s"),
+            dbus.Array([], signature="(ss)"),
+            dbus.Array([], signature="s"),
+            dbus.Boolean(False),
+            dbus.Array([], signature="(ssss)"),
+            ifaces,
+            dbus.Array([], signature="s"),
+            dbus.Array([], signature="s"),
+        )
     fw = read_fw_state()
     ifaces = dbus.Array(fw.get("trustedInterfaces", []) or [], signature="s")
     services = dbus.Array(active_services(), signature="s")
@@ -141,7 +168,22 @@ def make_zone_settings_v1():
     )
 
 
-def make_zone_settings_v2():
+def make_zone_settings_v2(zone_name: str = "nixos"):
+    if zone_name in ("libvirt", "libvirt-routed"):
+        return dbus.Dictionary({
+            "version": dbus.String("1.0"),
+            "short": dbus.String(zone_name),
+            "description": dbus.String("Zone virtuelle Libvirt (interfaces virbr* approuvées par NixOS)"),
+            "target": dbus.String("ACCEPT"),
+            "services": dbus.Array([], signature="s"),
+            "ports": dbus.Array([], signature="(ss)"),
+            "interfaces": dbus.Array(RUNTIME_ZONE_INTERFACES.get(zone_name, []), signature="s"),
+            "sources": dbus.Array([], signature="s"),
+            "forward_ports": dbus.Array([], signature="(ssss)"),
+            "rich_rules": dbus.Array([], signature="s"),
+            "protocols": dbus.Array([], signature="s"),
+            "masquerade": dbus.Boolean(False),
+        }, signature="sv")
     fw = read_fw_state()
     return dbus.Dictionary({
         "version": dbus.String("1.0"),
@@ -211,49 +253,56 @@ class ConfigServiceObject(dbus.service.Object):
 
 
 class ConfigZoneObject(dbus.service.Object):
-    def __init__(self, bus_name, root_obj):
+    def __init__(self, bus_name, root_obj, zone_name: str, obj_path: str):
         self.root_obj = root_obj
-        super().__init__(bus_name, ZONE_PATH)
+        self.zone_name = zone_name
+        super().__init__(bus_name, obj_path)
 
     @dbus.service.method(BUS_NAME + ".config.zone", out_signature="s")
     def getName(self):
-        return "nixos"
+        return self.zone_name
 
     @dbus.service.method(BUS_NAME + ".config.zone", out_signature="(sssbsasa(ss)asba(ssss)asasas)")
     def getSettings(self):
-        return make_zone_settings_v1()
+        return make_zone_settings_v1(self.zone_name)
 
     @dbus.service.method(BUS_NAME + ".config.zone", out_signature="a{sv}")
     def getSettings2(self):
-        return make_zone_settings_v2()
+        return make_zone_settings_v2(self.zone_name)
 
     @dbus.service.method(BUS_NAME + ".config.zone", out_signature="as")
     def getServices(self):
+        if self.zone_name != "nixos":
+            return dbus.Array([], signature="s")
         return dbus.Array(active_services(), signature="s")
 
     @dbus.service.method(BUS_NAME + ".config.zone", out_signature="a(ss)")
     def getPorts(self):
+        if self.zone_name != "nixos":
+            return dbus.Array([], signature="(ss)")
         return dbus.Array([(p, proto) for p, proto in ports_as_pairs()], signature="(ss)")
 
     @dbus.service.method(BUS_NAME + ".config.zone", out_signature="as")
     def getInterfaces(self):
+        if self.zone_name in RUNTIME_ZONE_INTERFACES:
+            return dbus.Array(RUNTIME_ZONE_INTERFACES[self.zone_name], signature="s")
         return dbus.Array(read_fw_state().get("trustedInterfaces", []) or [], signature="s")
 
     @dbus.service.method(BUS_NAME + ".config.zone", in_signature="s")
     def addService(self, service):
-        self.root_obj.addService("nixos", service, 0)
+        self.root_obj.addService(self.zone_name, service, 0)
 
     @dbus.service.method(BUS_NAME + ".config.zone", in_signature="s")
     def removeService(self, service):
-        self.root_obj.removeService("nixos", service)
+        self.root_obj.removeService(self.zone_name, service)
 
     @dbus.service.method(BUS_NAME + ".config.zone", in_signature="ss")
     def addPort(self, port, protocol):
-        self.root_obj.addPort("nixos", port, protocol, 0)
+        self.root_obj.addPort(self.zone_name, port, protocol, 0)
 
     @dbus.service.method(BUS_NAME + ".config.zone", in_signature="ss")
     def removePort(self, port, protocol):
-        self.root_obj.removePort("nixos", port, protocol)
+        self.root_obj.removePort(self.zone_name, port, protocol)
 
     @dbus.service.signal(BUS_NAME + ".config.zone", signature="s")
     def Updated(self, name):
@@ -266,15 +315,17 @@ class ConfigRootObject(dbus.service.Object):
 
     @dbus.service.method(BUS_NAME + ".config", out_signature="as")
     def getZoneNames(self):
-        return dbus.Array(["nixos"], signature="s")
+        return dbus.Array(["nixos", "libvirt"], signature="s")
 
     @dbus.service.method(BUS_NAME + ".config", out_signature="ao")
     def listZones(self):
-        return dbus.Array([dbus.ObjectPath(ZONE_PATH)], signature="o")
+        return dbus.Array([dbus.ObjectPath(ZONE_NIXOS_PATH), dbus.ObjectPath(ZONE_LIBVIRT_PATH)], signature="o")
 
     @dbus.service.method(BUS_NAME + ".config", in_signature="s", out_signature="o")
     def getZoneByName(self, zone):
-        return dbus.ObjectPath(ZONE_PATH)
+        if str(zone) in ("libvirt", "libvirt-routed"):
+            return dbus.ObjectPath(ZONE_LIBVIRT_PATH)
+        return dbus.ObjectPath(ZONE_NIXOS_PATH)
 
     @dbus.service.method(BUS_NAME + ".config", out_signature="as")
     def getServiceNames(self):
@@ -294,6 +345,21 @@ class ConfigRootObject(dbus.service.Object):
             raise dbus.DBusException("INVALID_SERVICE: " + s)
         idx = SERVICE_LIST.index(s)
         return dbus.ObjectPath(CONFIG_PATH + "/service/" + str(idx))
+
+    @dbus.service.method("org.freedesktop.DBus.Properties", in_signature="ss", out_signature="v")
+    def Get(self, interface_name, property_name):
+        if str(property_name) == "FirewallBackend":
+            return dbus.String("nftables" if shutil.which("nft") else "iptables")
+        if str(property_name) == "DefaultZone":
+            return dbus.String("nixos")
+        return dbus.String("")
+
+    @dbus.service.method("org.freedesktop.DBus.Properties", in_signature="s", out_signature="a{sv}")
+    def GetAll(self, interface_name):
+        return dbus.Dictionary({
+            "FirewallBackend": dbus.String("nftables" if shutil.which("nft") else "iptables"),
+            "DefaultZone": dbus.String("nixos"),
+        }, signature="sv")
 
 
 class NixOSFirewallDShim(dbus.service.Object):
@@ -323,11 +389,11 @@ class NixOSFirewallDShim(dbus.service.Object):
 
     @dbus.service.method(BUS_NAME, in_signature="s", out_signature="(sssbsasa(ss)asba(ssss)asasas)")
     def getZoneSettings(self, zone):
-        return make_zone_settings_v1()
+        return make_zone_settings_v1(str(zone) or "nixos")
 
     @dbus.service.method(BUS_NAME, in_signature="s", out_signature="a{sv}")
     def getZoneSettings2(self, zone):
-        return make_zone_settings_v2()
+        return make_zone_settings_v2(str(zone) or "nixos")
 
     @dbus.service.method(BUS_NAME)
     def authorizeAll(self):
@@ -341,25 +407,74 @@ class NixOSFirewallDShim(dbus.service.Object):
     def reload(self):
         run_ctl_async(["rebuild"], lambda: self.Reloaded())
 
+    # --- Interface org.fedoraproject.FirewallD1.zone ---
     @dbus.service.method(BUS_NAME + ".zone", out_signature="as")
     def getZones(self):
-        return dbus.Array(["nixos"], signature="s")
+        return dbus.Array(["nixos", "libvirt", "libvirt-routed"], signature="s")
 
     @dbus.service.method(BUS_NAME + ".zone", out_signature="a{sa{sas}}")
     def getActiveZones(self):
         ifaces = read_fw_state().get("trustedInterfaces", []) or []
-        return {"nixos": {"interfaces": dbus.Array(ifaces, signature="s"), "sources": dbus.Array([], signature="s")}}
+        out = {
+            "nixos": {"interfaces": dbus.Array(ifaces, signature="s"), "sources": dbus.Array([], signature="s")},
+        }
+        if RUNTIME_ZONE_INTERFACES.get("libvirt"):
+            out["libvirt"] = {
+                "interfaces": dbus.Array(RUNTIME_ZONE_INTERFACES["libvirt"], signature="s"),
+                "sources": dbus.Array([], signature="s"),
+            }
+        return out
+
+    @dbus.service.method(BUS_NAME + ".zone", in_signature="s", out_signature="s")
+    def getZoneOfInterface(self, interface):
+        iface = str(interface)
+        for z, lst in RUNTIME_ZONE_INTERFACES.items():
+            if iface in lst:
+                return z
+        return "nixos"
+
+    @dbus.service.method(BUS_NAME + ".zone", in_signature="ss", out_signature="s")
+    def addInterface(self, zone, interface):
+        return self.changeZoneOfInterface(zone, interface)
+
+    @dbus.service.method(BUS_NAME + ".zone", in_signature="ss", out_signature="s")
+    def changeZoneOfInterface(self, zone, interface):
+        z = str(zone) or "nixos"
+        iface = str(interface).strip()
+        for lst in RUNTIME_ZONE_INTERFACES.values():
+            if iface in lst:
+                lst.remove(iface)
+        if z in RUNTIME_ZONE_INTERFACES and iface:
+            RUNTIME_ZONE_INTERFACES[z].append(iface)
+        return z
+
+    @dbus.service.method(BUS_NAME + ".zone", in_signature="ss", out_signature="s")
+    def removeInterface(self, zone, interface):
+        iface = str(interface).strip()
+        removed_from = str(zone) or "nixos"
+        for z, lst in RUNTIME_ZONE_INTERFACES.items():
+            if iface in lst:
+                lst.remove(iface)
+                removed_from = z
+        return removed_from
 
     @dbus.service.method(BUS_NAME + ".zone", in_signature="s", out_signature="aas")
     def getPorts(self, zone):
+        if str(zone) in ("libvirt", "libvirt-routed"):
+            return dbus.Array([], signature="as")
         return dbus.Array([dbus.Array([p, proto], signature="s") for p, proto in ports_as_pairs()], signature="as")
 
     @dbus.service.method(BUS_NAME + ".zone", in_signature="s", out_signature="as")
     def getServices(self, zone):
+        if str(zone) in ("libvirt", "libvirt-routed"):
+            return dbus.Array([], signature="s")
         return dbus.Array(active_services(), signature="s")
 
     @dbus.service.method(BUS_NAME + ".zone", in_signature="s", out_signature="as")
     def getInterfaces(self, zone):
+        z = str(zone)
+        if z in RUNTIME_ZONE_INTERFACES:
+            return dbus.Array(RUNTIME_ZONE_INTERFACES[z], signature="s")
         return dbus.Array(read_fw_state().get("trustedInterfaces", []) or [], signature="s")
 
     @dbus.service.method(BUS_NAME + ".zone", in_signature="sssu", out_signature="s")
@@ -406,6 +521,23 @@ class NixOSFirewallDShim(dbus.service.Object):
         run_ctl_async(["fw-ports-batch", "remove", payload], _done)
         return "nixos"
 
+    # --- Interface org.fedoraproject.FirewallD1.policy (requis par libvirt >= 9) ---
+    @dbus.service.method(BUS_NAME + ".policy", out_signature="as")
+    def getPolicies(self):
+        return dbus.Array(["libvirt-to-host", "libvirt-routed-in", "libvirt-routed-out"], signature="s")
+
+    # --- Interface org.fedoraproject.FirewallD1.direct (compatibilité libvirt backend iptables) ---
+    @dbus.service.method(BUS_NAME + ".direct", in_signature="sas", out_signature="s")
+    def passthrough(self, ipv, args):
+        bin_map = {"ipv4": "iptables", "ipv6": "ip6tables", "eb": "ebtables"}
+        tool = bin_map.get(str(ipv))
+        if not tool or not shutil.which(tool):
+            return ""
+        res = subprocess.run([tool] + [str(a) for a in args], capture_output=True, text=True)
+        if res.returncode != 0:
+            raise dbus.DBusException("COMMAND_FAILED: " + (res.stderr or res.stdout).strip())
+        return res.stdout
+
     @dbus.service.signal(BUS_NAME + ".zone", signature="sssi")
     def PortAdded(self, zone, port, protocol, timeout):
         pass
@@ -428,9 +560,9 @@ class NixOSFirewallDShim(dbus.service.Object):
 
     @dbus.service.method("org.freedesktop.DBus.Properties", in_signature="ss", out_signature="v")
     def Get(self, interface_name, property_name):
-        if property_name == "state":
+        if str(property_name) == "state":
             return dbus.String("RUNNING")
-        if property_name == "version":
+        if str(property_name) == "version":
             return dbus.String("1.3.0-nixos")
         return dbus.String("")
 
@@ -448,10 +580,11 @@ def main() -> int:
     bus_name = dbus.service.BusName(BUS_NAME, bus=bus)
     root = NixOSFirewallDShim(bus_name)
     ConfigRootObject(bus_name)
-    root.zone_cfg = ConfigZoneObject(bus_name, root)
+    root.zone_cfg = ConfigZoneObject(bus_name, root, "nixos", ZONE_NIXOS_PATH)
+    ConfigZoneObject(bus_name, root, "libvirt", ZONE_LIBVIRT_PATH)
     for idx, svc in enumerate(SERVICE_LIST):
         ConfigServiceObject(bus_name, idx, svc)
-    print("[firewall-bridge] Bridge D-Bus complet org.fedoraproject.FirewallD1 -> NixOS actif.", flush=True)
+    print("[firewall-bridge] Bridge D-Bus complet org.fedoraproject.FirewallD1 -> NixOS (+ zones libvirt) actif.", flush=True)
     GLib.MainLoop().run()
     return 0
 

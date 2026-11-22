@@ -55,9 +55,13 @@ let
       </policy>
       <policy group="wheel">
         <allow send_destination="org.fedoraproject.FirewallD1"/>
+        <deny send_destination="org.fedoraproject.FirewallD1"
+              send_interface="org.fedoraproject.FirewallD1.direct"/>
       </policy>
       <policy context="default">
         <deny own="org.fedoraproject.FirewallD1"/>
+        <deny send_destination="org.fedoraproject.FirewallD1"
+              send_interface="org.fedoraproject.FirewallD1.direct"/>
         <deny send_destination="org.fedoraproject.FirewallD1"
               send_interface="org.fedoraproject.FirewallD1"
               send_member="reload"/>
@@ -487,7 +491,7 @@ in
         after = [ "dbus.service" "network.target" ];
         wantedBy = [ "multi-user.target" ];
         aliases = [ "firewalld.service" ];
-        path = with pkgs; [ nix nixos-rebuild coreutils systemd ];
+        path = with pkgs; [ nix nixos-rebuild coreutils systemd nftables iptables ];
         environment = {
           GI_TYPELIB_PATH = lib.makeSearchPath "lib/girepository-1.0" [
             pkgs.glib.out
@@ -538,7 +542,8 @@ in
       # Démarre et active en autostart le réseau NAT 'default' de libvirt pour cockpit-machines
       systemd.services.libvirtd-init-defaults = lib.mkIf cfg.enableMachines {
         description = "Active le réseau NAT par défaut de libvirt pour cockpit-machines";
-        after = [ "libvirtd.service" ];
+        after = [ "libvirtd.service" ]
+          ++ lib.optional cfg.enableFirewallBridge "cockpit-nixos-firewall-bridge.service";
         wants = [ "libvirtd.service" ];
         wantedBy = [ "multi-user.target" ];
         path = [ pkgs.libvirt pkgs.gnugrep ];
