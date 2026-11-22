@@ -18,6 +18,9 @@
 let
   cfgFan = config.services.steamdeck-server;
 
+  # Courbe ventilateur serveur 24/7 utilisant la VRAIE API sysfs de steamdeck_hwmon
+  # (fan1_target en RPM 2000..7300, compatible Steam Deck LCD Jupiter & OLED Galileo,
+  # et retour automatique au contrôle EC via fan1_target = 0 à l'arrêt).
   steamdeckServerFanDaemon = pkgs.writers.writePython3Bin "steamdeck-server-fan" {
     doCheck = false;
   } ''
@@ -27,27 +30,51 @@ let
     import time
     from pathlib import Path
 
-    # Courbe thermique serveur 24/7 : (Température APU °C, PWM 0..255)
-    CURVE = [(40, 60), (50, 95), (60, 140), (70, 195), (80, 240), (85, 255)]
+    # Courbe thermique serveur 24/7 : (Température max °C, Vitesse cible RPM)
+    # Plage officielle Valve (jupiter-fan-control) : 1500/2000..7300 RPM
+    CURVE = [
+        (35.0, 2000),
+        (45.0, 2600),
+        (55.0, 3400),
+        (65.0, 4500),
+        (75.0, 5800),
+        (82.0, 7000),
+        (86.0, 7300),
+    ]
     running = True
 
-    def find_hwmon(names):
+    def find_hwmons(names):
+        found = []
         for hw in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
             p = Path(hw)
             nf = p / "name"
             if nf.exists() and nf.read_text(errors="ignore").strip() in names:
-                return p
-        return None
+                found.append(p)
+        return found
 
-    def interp(t):
-        if t <= CURVE[0][0]:
+    def read_max_temp_c():
+        temps = []
+        for hw in find_hwmons({"k10temp", "amdgpu", "acpitz"}):
+            for tf in sorted(hw.glob("temp*_input")):
+                try:
+                    val = int(tf.read_text(encoding="utf-8").strip()) / 1000.0
+                    if 0.0 < val < 150.0:
+                        temps.append(val)
+                except Exception:
+                    pass
+        return max(temps) if temps else None
+
+    def interp_rpm(temp_c):
+        if temp_c is None:
+            return 5500  # Valeur refuge sûre si capteur temporairement illisible
+        if temp_c <= CURVE[0][0]:
             return CURVE[0][1]
         for i in range(len(CURVE) - 1):
-            t0, p0 = CURVE[i]
-            t1, p1 = CURVE[i + 1]
-            if t0 <= t <= t1:
-                return int(p0 + ((t - t0) / float(t1 - t0)) * (p1 - p0))
-        return 255
+            t0, r0 = CURVE[i]
+            t1, r1 = CURVE[i + 1]
+            if t0 <= temp_c <= t1:
+                return int(r0 + ((temp_c - t0) / float(t1 - t0)) * (r1 - r0))
+        return CURVE[-1][1]
 
     def main():
         global running
@@ -57,24 +84,39 @@ let
         signal.signal(signal.SIGTERM, _stop)
         signal.signal(signal.SIGINT, _stop)
 
-        sd = find_hwmon({"steamdeck_hwmon"})
+        # Attend jusqu'à 10s que le module steamdeck_hwmon / jupiter soit initialisé
+        sd = None
+        for _ in range(20):
+            matches = find_hwmons({"steamdeck_hwmon", "jupiter"})
+            if matches and (matches[0] / "fan1_target").exists():
+                sd = matches[0]
+                break
+            time.sleep(0.5)
+
         if not sd:
-            return 1
-        pwm_en, pwm_val = sd / "pwm1_enable", sd / "pwm1"
+            # Pas sur un Steam Deck (ex. VM de test) : quitte proprement sans échec systemd
+            print("[steamdeck-server-fan] steamdeck_hwmon/fan1_target non détecté (matériel non-Steam Deck), arrêt propre.", flush=True)
+            return 0
+
+        fan_target = sd / "fan1_target"
+        last_rpm = 0
+        print("[steamdeck-server-fan] Contrôle ventilateur serveur 24/7 actif sur " + str(fan_target), flush=True)
         try:
-            pwm_en.write_text("1\n")
             while running:
                 try:
-                    apu = find_hwmon({"k10temp", "amdgpu"})
-                    temp = int((apu / "temp1_input").read_text().strip()) / 1000.0 if apu and (apu / "temp1_input").exists() else 65.0
-                    pwm_val.write_text(str(interp(temp)) + "\n")
+                    temp = read_max_temp_c()
+                    rpm = interp_rpm(temp)
+                    # Hystérésis douce (+/- 150 RPM) sauf en montée thermique rapide
+                    if rpm > last_rpm or abs(rpm - last_rpm) >= 150 or last_rpm == 0:
+                        fan_target.write_text(str(rpm) + "\n", encoding="utf-8")
+                        last_rpm = rpm
                 except Exception as exc:
                     print("[steamdeck-server-fan] Erreur lecture/écriture hwmon : " + str(exc), file=sys.stderr, flush=True)
                 time.sleep(2.0)
         finally:
-            # Sécurité : rend le contrôle au contrôleur embarqué (BIOS/EC) à l'arrêt
+            # Sécurité Valve officielle : écrire 0 dans fan1_target rend le contrôle à l'EC
             try:
-                pwm_en.write_text("2\n")
+                fan_target.write_text("0\n", encoding="utf-8")
             except Exception:
                 pass
         return 0
@@ -98,7 +140,7 @@ in
     enableCustomFanCurve = lib.mkOption {
       type = lib.types.bool;
       default = false;
-      description = "Remplace jupiter-fan-control (Valve) par une courbe ventilateur serveur 24/7 plus fraîche via steamdeck_hwmon.";
+      description = "Remplace jupiter-fan-control (Valve) par une courbe ventilateur serveur 24/7 plus fraîche via steamdeck_hwmon (fan1_target RPM).";
     };
 
     adminUsers = lib.mkOption {
@@ -111,7 +153,7 @@ in
   config = lib.mkMerge [
     {
       # --------------------------------------------------------------------------
-      # 1. Écosystème Cockpit Déclaratif + Podman + KVM + Files + Health-Checker
+      # 1. Écosystème Cockpit Déclaratif + Podman + KVM + Stockage + Health-Checker
       # --------------------------------------------------------------------------
       services.cockpit-nixos = {
         enable = lib.mkDefault true;
@@ -145,12 +187,14 @@ in
       });
 
       # --------------------------------------------------------------------------
-      # 2. Drivers Steam Deck (ventilateur + matériel) & Tuning Serveur 24/7
+      # 2. Drivers Steam Deck (kernel Neptune + ventilateur) & Tuning Serveur 24/7
       # --------------------------------------------------------------------------
       jovian = {
         devices.steamdeck = {
           enable = lib.mkDefault true;
           autoUpdate = lib.mkDefault false; # Pas de flash BIOS/EC surprise sur un serveur
+          # Désactive proprement jupiter-fan-control si la courbe serveur custom est choisie
+          enableOsFanControl = lib.mkIf cfgFan.enableCustomFanCurve (lib.mkForce false);
         };
         steam.enable = lib.mkDefault false; # Mode serveur headless (pas de Gamescope/Steam UI)
       };
@@ -165,8 +209,8 @@ in
         htop
       ];
 
-      # Drivers EC/hwmon Steam Deck + extinction écran après 60s (anti burn-in OLED)
-      boot.kernelModules = [ "steamdeck" "steamdeck_hwmon" "k10temp" ];
+      # Extinction de l'écran après 60s (anti burn-in OLED ; les drivers steamdeck/steamdeck_hwmon/k10temp
+      # sont chargés automatiquement par le kernel Neptune via ACPI/PCI sans faire échouer les VMs)
       boot.kernelParams = [ "consoleblank=60" ];
 
       # Empêche toute mise en veille en mode serveur 24/7
@@ -177,19 +221,17 @@ in
 
       # Courbe ventilateur serveur optionnelle (si services.steamdeck-server.enableCustomFanCurve = true)
       systemd.services.steamdeck-server-fan = lib.mkIf cfgFan.enableCustomFanCurve {
-        description = "Courbe ventilateur serveur 24/7 via steamdeck_hwmon";
+        description = "Courbe ventilateur serveur 24/7 via steamdeck_hwmon (fan1_target RPM)";
         after = [ "multi-user.target" ];
         wantedBy = [ "multi-user.target" ];
+        unitConfig.ConditionVirtualization = "!vm";
         serviceConfig = {
           Type = "simple";
           ExecStart = "${steamdeckServerFanDaemon}/bin/steamdeck-server-fan";
+          OOMScoreAdjust = -1000;
           Restart = "on-failure";
           RestartSec = "5s";
         };
-      };
-
-      systemd.services.jupiter-fan-control = lib.mkIf cfgFan.enableCustomFanCurve {
-        enable = lib.mkForce false;
       };
     }
 
