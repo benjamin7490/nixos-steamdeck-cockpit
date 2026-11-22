@@ -25,7 +25,7 @@ A NixOS module and **Cockpit** integration that make Cockpit's **real built-in m
   - Pure background systemd protection (no extra UI clutter; inspect logs natively in Cockpit *Logs* / *Services* or `journalctl -u nixos-health-checker`): hardware watchdog + `panic=10`, native `systemd-boot` `bootCounting` (when available in `nixpkgs`), early boot-loop counter, and health probes gating `boot-complete.target`. Repeated boot failures on a new generation trigger an **automatic rollback** to the last known-good generation.
 - **Steam Deck Headless Server Profile (via Jovian-NixOS)**:
   - Valve Neptune kernel with `steamdeck` / `steamdeck_hwmon` drivers and `jupiter-fan-control` (plus an optional 24/7 server fan curve daemon).
-  - Headless tuning: Steam/Gamescope disabled, sleep/suspend disabled, and `consoleblank=60` for OLED burn-in protection.
+  - Headless tuning: Steam/Gamescope disabled, sleep/suspend disabled, `consoleblank=60` + DPMS powerdown + automatic backlight/panel power-off after 60 s (`steamdeck-screen on|off` helper), plus optional kernel-level display disable (`video=eDP-1:d`) for zero light & zero OLED burn-in.
 
 ---
 
@@ -138,6 +138,8 @@ All profile defaults use `lib.mkDefault`, so any setting can be overridden direc
 | `services.cockpit-nixos.maxBootAttempts` | `3` | Maximum failed boot attempts before automatic rollback |
 | `services.steamdeck-server.adminUsers` | `[ ]` | Existing users to grant `wheel`, `networkmanager` (and `libvirtd`) |
 | `services.steamdeck-server.enableCustomFanCurve` | `false` | Replace `jupiter-fan-control` with a custom 24/7 server fan curve |
+| `services.steamdeck-server.screenAutoOff` | `true` | Enable DPMS powerdown and cut backlight/panel power 60 s after boot |
+| `services.steamdeck-server.disableInternalDisplay` | `false` | Disable internal `eDP-1` panel at kernel level (`video=eDP-1:d`) |
 
 ---
 

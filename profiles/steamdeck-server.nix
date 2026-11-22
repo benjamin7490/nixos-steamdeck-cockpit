@@ -125,6 +125,37 @@ let
         sys.exit(main())
   '';
 
+  # Script utilitaire pour couper ou rallumer physiquement la dalle + rétroéclairage (LCD & OLED)
+  steamdeckScreenCtl = pkgs.writeShellScriptBin "steamdeck-screen" ''
+    set -eu
+    action="''${1:-off}"
+    if [ "$action" = "on" ]; then
+      for bl in /sys/class/backlight/*; do
+        [ -d "$bl" ] || continue
+        [ -w "$bl/bl_power" ] && echo 0 > "$bl/bl_power" || true
+        if [ -r "$bl/max_brightness" ] && [ -w "$bl/brightness" ]; then
+          max=$(cat "$bl/max_brightness")
+          echo $((max / 2 > 0 ? max / 2 : max)) > "$bl/brightness" || true
+        fi
+      done
+      for fb in /sys/class/graphics/fb*/blank; do
+        [ -w "$fb" ] && echo 0 > "$fb" || true
+      done
+    else
+      for bl in /sys/class/backlight/*; do
+        [ -d "$bl" ] || continue
+        [ -w "$bl/brightness" ] && echo 0 > "$bl/brightness" || true
+        [ -w "$bl/bl_power" ] && echo 4 > "$bl/bl_power" || true
+      done
+      # Contrôleur rétroéclairage OLED Galileo (i2c-ANX7580A) si présent
+      oled_bl="/sys/devices/platform/AMDI0010:02/i2c-2/i2c-ANX7580A:00/brightness"
+      [ -w "$oled_bl" ] && echo 0 > "$oled_bl" || true
+      for fb in /sys/class/graphics/fb*/blank; do
+        [ -w "$fb" ] && echo 4 > "$fb" || true
+      done
+    fi
+  '';
+
 in
 {
   imports = [
@@ -147,6 +178,18 @@ in
       type = lib.types.listOf lib.types.str;
       default = [ ];
       description = "Utilisateurs existants auxquels ajouter automatiquement les groupes wheel, networkmanager et libvirtd.";
+    };
+
+    screenAutoOff = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Active DPMS powerdown + extinction physique du rétroéclairage et de la dalle 60s après le démarrage (anti burn-in OLED & zéro lumière LCD).";
+    };
+
+    disableInternalDisplay = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Désactive totalement la dalle interne du Steam Deck au niveau noyau (video=eDP-1:d) dès la sortie du bootloader (un écran externe USB-C/HDMI reste utilisable).";
     };
   };
 
@@ -207,11 +250,51 @@ in
         nvme-cli
         powertop
         htop
+        steamdeckScreenCtl
       ];
 
-      # Extinction de l'écran après 60s (anti burn-in OLED ; les drivers steamdeck/steamdeck_hwmon/k10temp
-      # sont chargés automatiquement par le kernel Neptune via ACPI/PCI sans faire échouer les VMs)
-      boot.kernelParams = [ "consoleblank=60" ];
+      # Extinction console après 60s + niveau de log console réduit (loglevel=3)
+      # + désactivation matérielle eDP-1 optionnelle (video=eDP-1:d)
+      # (les drivers steamdeck/steamdeck_hwmon/k10temp sont auto-chargés par le kernel Neptune via ACPI/PCI)
+      boot.consoleLogLevel = lib.mkDefault 3;
+      boot.kernelParams =
+        [ "consoleblank=60" ]
+        ++ lib.optional cfgFan.disableInternalDisplay "video=eDP-1:d";
+
+      # Active le vrai mode DPMS powerdown sur la console TTY1 (au lieu d'un simple écran noir rétroéclairé)
+      systemd.services.steamdeck-screen-powersave = lib.mkIf (cfgFan.screenAutoOff && !cfgFan.disableInternalDisplay) {
+        description = "Configure DPMS powerdown sur la console Steam Deck";
+        wantedBy = [ "multi-user.target" ];
+        unitConfig.ConditionVirtualization = "!vm";
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = "${pkgs.writeShellScript "steamdeck-tty-powersave" ''
+            [ -e /dev/tty1 ] && ${pkgs.util-linux}/bin/setterm --blank 1 --powersave powerdown --powerdown 1 < /dev/tty1 > /dev/tty1 || true
+          ''}";
+        };
+      };
+
+      # Coupe physiquement le rétroéclairage & la dalle 60s après le démarrage (LCD & OLED)
+      systemd.services.steamdeck-backlight-off = lib.mkIf (cfgFan.screenAutoOff && !cfgFan.disableInternalDisplay) {
+        description = "Éteint physiquement le rétroéclairage et la dalle Steam Deck (anti burn-in)";
+        unitConfig.ConditionVirtualization = "!vm";
+        serviceConfig = {
+          Type = "oneshot";
+          ExecStart = "${steamdeckScreenCtl}/bin/steamdeck-screen off";
+        };
+      };
+
+      systemd.timers.steamdeck-backlight-off = lib.mkIf (cfgFan.screenAutoOff && !cfgFan.disableInternalDisplay) {
+        description = "Minuterie d'extinction de l'écran Steam Deck 60s après le boot";
+        wantedBy = [ "timers.target" ];
+        unitConfig.ConditionVirtualization = "!vm";
+        timerConfig = {
+          OnBootSec = "60s";
+          AccuracySec = "5s";
+          Unit = "steamdeck-backlight-off.service";
+        };
+      };
 
       # Empêche toute mise en veille en mode serveur 24/7
       systemd.targets.sleep.enable = lib.mkDefault false;
