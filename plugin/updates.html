@@ -85,6 +85,101 @@
           </div>
 
           <div class="pf-v6-c-card">
+            <form id="form-automation">
+              <div class="pf-v6-c-card__header">
+                <div class="pf-v6-c-card__title">
+                  <h2 class="pf-v6-c-title pf-m-lg">Automatisation &amp; Optimisation du Store</h2>
+                  <p class="nixos-muted">Configuration déclarative de <code>system.autoUpgrade</code>, <code>nix.settings.auto-optimise-store</code> et <code>nix.optimise</code>.</p>
+                </div>
+                <div class="pf-v6-c-card__actions">
+                  <button id="btn-save-automation" class="pf-v6-c-button pf-m-primary pf-m-small" type="submit">Enregistrer et appliquer</button>
+                </div>
+              </div>
+              <div class="pf-v6-c-card__body">
+                <div class="nixos-split-grid">
+                  <div class="nixos-stack">
+                    <div class="nixos-actions">
+                      <h3 class="pf-v6-c-title pf-m-md">Mises à jour automatiques</h3>
+                      <span id="auto-upg-badge" class="pf-v6-c-label"><span class="pf-v6-c-label__content">--</span></span>
+                    </div>
+                    <div id="auto-upg-next" class="nixos-muted">Prochaine exécution : --</div>
+
+                    <label class="nixos-check-row">
+                      <input id="auto-upg-enable" type="checkbox">
+                      <span>Activer les mises à jour automatiques (<code>system.autoUpgrade</code>)</span>
+                    </label>
+
+                    <div class="nixos-field">
+                      <label for="auto-upg-dates" class="nixos-field-label">Planification systemd (<code>OnCalendar</code>)</label>
+                      <span class="pf-v6-c-form-control">
+                        <input id="auto-upg-dates" type="text" list="calendar-presets" placeholder="ex : 03:30, daily, weekly, Sun 03:30" required>
+                      </span>
+                      <datalist id="calendar-presets">
+                        <option value="03:30"></option>
+                        <option value="04:00"></option>
+                        <option value="daily"></option>
+                        <option value="weekly"></option>
+                        <option value="Sun 03:30"></option>
+                      </datalist>
+                    </div>
+
+                    <label class="nixos-check-row">
+                      <input id="auto-upg-reboot" type="checkbox">
+                      <span>Autoriser le redémarrage automatique (si noyau mis à jour)</span>
+                    </label>
+
+                    <div id="auto-upg-window-box" class="nixos-time-row">
+                      <div class="nixos-field">
+                        <label for="auto-upg-win-lower" class="nixos-field-label">Fenêtre : de</label>
+                        <span class="pf-v6-c-form-control">
+                          <input id="auto-upg-win-lower" type="time" value="03:00">
+                        </span>
+                      </div>
+                      <div class="nixos-field">
+                        <label for="auto-upg-win-upper" class="nixos-field-label">à</label>
+                        <span class="pf-v6-c-form-control">
+                          <input id="auto-upg-win-upper" type="time" value="05:30">
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="nixos-stack">
+                    <div class="nixos-actions">
+                      <h3 class="pf-v6-c-title pf-m-md">Optimisation automatique du Nix Store</h3>
+                      <span id="opt-store-badge" class="pf-v6-c-label"><span class="pf-v6-c-label__content">--</span></span>
+                    </div>
+                    <div id="opt-timer-next" class="nixos-muted">Optimisation périodique : --</div>
+
+                    <label class="nixos-check-row">
+                      <input id="opt-auto-store" type="checkbox">
+                      <span>Activer <code>auto-optimise-store</code> (déduplication automatique à chaque écriture dans le store)</span>
+                    </label>
+
+                    <label class="nixos-check-row">
+                      <input id="opt-periodic-enable" type="checkbox">
+                      <span>Activer l'optimisation périodique planifiée (<code>nix.optimise.automatic</code>)</span>
+                    </label>
+
+                    <div class="nixos-field">
+                      <label for="opt-periodic-dates" class="nixos-field-label">Planification périodique (<code>OnCalendar</code>)</label>
+                      <span class="pf-v6-c-form-control">
+                        <input id="opt-periodic-dates" type="text" list="optimise-presets" placeholder="ex : 03:45, weekly, daily" required>
+                      </span>
+                      <datalist id="optimise-presets">
+                        <option value="03:45"></option>
+                        <option value="weekly"></option>
+                        <option value="daily"></option>
+                        <option value="Sun 04:00"></option>
+                      </datalist>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </form>
+          </div>
+
+          <div class="pf-v6-c-card">
             <div class="pf-v6-c-card__header">
               <div class="pf-v6-c-card__title">
                 <h2 class="pf-v6-c-title pf-m-lg">Générations &amp; Rollbacks (<span id="metric-gen-count">0</span>)</h2>

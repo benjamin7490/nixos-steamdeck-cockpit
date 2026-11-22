@@ -591,12 +591,12 @@ in
       # 7. Mises à jour automatiques + Health-Checker & Auto-Rollback (style MicroOS)
       # -------------------------------------------------------------------------
       system.autoUpgrade = lib.mkIf cfg.enableAutoUpgrade {
-        enable = true;
-        dates = cfg.autoUpgradeDates;
-        randomizedDelaySec = "30min";
-        allowReboot = true;
-        rebootWindow = cfg.autoUpgradeRebootWindow;
-        persistent = true;
+        enable = lib.mkDefault true;
+        dates = lib.mkDefault cfg.autoUpgradeDates;
+        randomizedDelaySec = lib.mkDefault "30min";
+        allowReboot = lib.mkDefault true;
+        rebootWindow = lib.mkDefault cfg.autoUpgradeRebootWindow;
+        persistent = lib.mkDefault true;
       };
 
       # Nettoyage périodique prudent (conserve les 14 derniers jours pour les rollbacks)
@@ -643,7 +643,7 @@ in
       };
 
       # Phase 3 (post-upgrade à chaud sans reboot) : vérifie les services et rollback live si cassé
-      systemd.services.nixos-upgrade = lib.mkIf (cfg.enableAutoUpgrade && cfg.enableHealthChecker) {
+      systemd.services.nixos-upgrade = lib.mkIf (config.system.autoUpgrade.enable && cfg.enableHealthChecker) {
         path = [ pkgs.iproute2 ];
         serviceConfig.ExecStartPost = [
           "${nixosHealthChecker}/bin/nixos-health-checker --live-check --cockpit-port ${toString cfg.port}"

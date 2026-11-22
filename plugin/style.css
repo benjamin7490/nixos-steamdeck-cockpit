@@ -192,6 +192,31 @@ body {
   margin-top: var(--pf-t--global--spacer--md, 1rem);
 }
 
+.nixos-check-row {
+  display: flex;
+  align-items: center;
+  gap: var(--pf-t--global--spacer--sm, 0.5rem);
+  cursor: pointer;
+  font-size: var(--pf-t--global--font--size--sm, 0.875rem);
+}
+
+.nixos-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pf-t--global--spacer--xs, 0.25rem);
+}
+
+.nixos-field-label {
+  font-size: var(--pf-t--global--font--size--sm, 0.875rem);
+  font-weight: 500;
+}
+
+.nixos-time-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(120px, 180px));
+  gap: var(--pf-t--global--spacer--sm, 0.5rem);
+}
+
 .nixos-hidden {
   display: none !important;
 }

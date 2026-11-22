@@ -38,6 +38,8 @@ IFACE_RE = re.compile(r"^[a-zA-Z0-9_.:-]{1,15}$")
 OPT_RE = re.compile(r"^[a-zA-Z0-9_=,./:@-]+$")
 DEV_RE = re.compile(r"^[a-zA-Z0-9_./:@=+-]+$")
 NM_KEY_RE = re.compile(r"^[a-zA-Z0-9._ -]{1,64}$")
+CALENDAR_RE = re.compile(r"^[a-zA-Z0-9:*.,/_ -]{1,64}$")
+HHMM_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
 ALLOWED_FSTYPES = {"ext4", "xfs", "btrfs", "vfat", "ntfs", "nfs", "nfs4", "cifs", "tmpfs", "none", "auto"}
 ALLOWED_MOUNT_PREFIXES = ("/mnt/", "/srv/", "/media/", "/data/", "/var/lib/libvirt/images", "/var/lib/containers")
@@ -57,6 +59,7 @@ DEFAULT_STATE = {
         "nmProfiles": {},
     },
     "mounts": [],
+    "automation": {},
 }
 
 
@@ -83,6 +86,8 @@ def load_state() -> dict:
         merged["network"].update(data["network"])
     if isinstance(data.get("mounts"), list):
         merged["mounts"] = data["mounts"]
+    if isinstance(data.get("automation"), dict):
+        merged["automation"] = data["automation"]
     return merged
 
 
@@ -179,6 +184,38 @@ def render_managed_nix(state: dict) -> str:
                 lines.append("      options = lib.mkDefault [ " + " ".join(nix_str(o) for o in opts) + " ];")
             lines.append("    };")
         lines.append("  };")
+
+    auto = state.get("automation", {})
+    if isinstance(auto, dict):
+        au = auto.get("autoUpgrade")
+        if isinstance(au, dict) and "enable" in au:
+            lines.append("")
+            lines.append("  system.autoUpgrade = {")
+            lines.append("    enable = lib.mkForce " + ("true" if au.get("enable") else "false") + ";")
+            if au.get("dates"):
+                lines.append("    dates = lib.mkForce " + nix_str(au["dates"]) + ";")
+            if "allowReboot" in au:
+                lines.append("    allowReboot = lib.mkForce " + ("true" if au.get("allowReboot") else "false") + ";")
+            if au.get("allowReboot") and au.get("rebootLower") and au.get("rebootUpper"):
+                lines.append("    rebootWindow = lib.mkForce {")
+                lines.append("      lower = " + nix_str(au["rebootLower"]) + ";")
+                lines.append("      upper = " + nix_str(au["rebootUpper"]) + ";")
+                lines.append("    };")
+            elif au.get("allowReboot") is False or au.get("useRebootWindow") is False:
+                lines.append("    rebootWindow = lib.mkForce null;")
+            lines.append("  };")
+
+        so = auto.get("storeOptimise")
+        if isinstance(so, dict):
+            if "autoOptimiseStore" in so:
+                lines.append("")
+                lines.append("  nix.settings.auto-optimise-store = lib.mkForce " + ("true" if so.get("autoOptimiseStore") else "false") + ";")
+            if "periodicEnable" in so:
+                lines.append("  nix.optimise = {")
+                lines.append("    automatic = lib.mkForce " + ("true" if so.get("periodicEnable") else "false") + ";")
+                if so.get("periodicDates"):
+                    lines.append("    dates = lib.mkForce [ " + nix_str(so["periodicDates"]) + " ];")
+                lines.append("  };")
 
     lines.append("}")
     lines.append("")
@@ -730,6 +767,135 @@ def sync_nm_profiles_from_cli() -> dict:
     return profiles
 
 
+def _query_timer(unit: str) -> dict:
+    info = {"active": False, "next": "", "calendar": ""}
+    try:
+        res = subprocess.run(
+            ["systemctl", "show", unit, "--property=LoadState,ActiveState,NextElapseUSecRealtime,TimersCalendar"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        kv = {}
+        for line in res.stdout.splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                kv[k.strip()] = v.strip()
+        if kv.get("LoadState") == "loaded" and kv.get("ActiveState") in ("active", "waiting"):
+            info["active"] = True
+        nxt = kv.get("NextElapseUSecRealtime", "")
+        if nxt and nxt not in ("n/a", "0"):
+            info["next"] = nxt
+        tc = kv.get("TimersCalendar", "")
+        m = re.search(r"OnCalendar=([^;\}]+)", tc)
+        if m:
+            info["calendar"] = m.group(1).strip()
+    except Exception:
+        pass
+    return info
+
+
+def _detect_auto_optimise_store() -> bool:
+    nix_conf = Path("/etc/nix/nix.conf")
+    if not nix_conf.exists():
+        return False
+    try:
+        for line in nix_conf.read_text(encoding="utf-8", errors="ignore").splitlines():
+            s = line.strip()
+            if s.startswith("#") or "=" not in s:
+                continue
+            k, v = s.split("=", 1)
+            if k.strip() == "auto-optimise-store":
+                return v.strip().lower() == "true"
+    except OSError:
+        pass
+    return False
+
+
+def read_automation_status(state: dict) -> dict:
+    upg_timer = _query_timer("nixos-upgrade.timer")
+    opt_timer = _query_timer("nix-optimise.timer")
+    live_auto_opt = _detect_auto_optimise_store()
+
+    saved = state.get("automation") if isinstance(state.get("automation"), dict) else {}
+    saved_au = saved.get("autoUpgrade") if isinstance(saved.get("autoUpgrade"), dict) else {}
+    saved_so = saved.get("storeOptimise") if isinstance(saved.get("storeOptimise"), dict) else {}
+
+    return {
+        "autoUpgrade": {
+            "enable": bool(saved_au["enable"]) if "enable" in saved_au else upg_timer["active"],
+            "dates": saved_au.get("dates") or upg_timer["calendar"] or "03:30",
+            "allowReboot": bool(saved_au["allowReboot"]) if "allowReboot" in saved_au else True,
+            "useRebootWindow": bool(saved_au["useRebootWindow"]) if "useRebootWindow" in saved_au else True,
+            "rebootLower": saved_au.get("rebootLower") or "03:00",
+            "rebootUpper": saved_au.get("rebootUpper") or "05:30",
+            "liveActive": upg_timer["active"],
+            "nextElapse": upg_timer["next"],
+        },
+        "storeOptimise": {
+            "autoOptimiseStore": bool(saved_so["autoOptimiseStore"]) if "autoOptimiseStore" in saved_so else live_auto_opt,
+            "liveAutoOptimiseStore": live_auto_opt,
+            "periodicEnable": bool(saved_so["periodicEnable"]) if "periodicEnable" in saved_so else opt_timer["active"],
+            "periodicDates": saved_so.get("periodicDates") or opt_timer["calendar"] or "03:45",
+            "livePeriodicActive": opt_timer["active"],
+            "nextElapse": opt_timer["next"],
+        },
+    }
+
+
+def validate_calendar_expr(expr: str, field_name: str) -> str:
+    val = str(expr or "").strip()
+    if not val or not CALENDAR_RE.match(val):
+        raise ValueError("Expression OnCalendar invalide pour " + field_name + " : " + val)
+    if shutil.which("systemd-analyze"):
+        res = subprocess.run(
+            ["systemd-analyze", "calendar", val],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if res.returncode != 0:
+            raise ValueError("Expression systemd OnCalendar invalide (" + val + ") : " + (res.stderr or res.stdout).strip())
+    return val
+
+
+def validate_automation(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("Payload automation invalide.")
+    au_in = payload.get("autoUpgrade") or {}
+    so_in = payload.get("storeOptimise") or {}
+
+    au_enable = bool(au_in.get("enable", False))
+    au_dates = validate_calendar_expr(au_in.get("dates", "03:30"), "autoUpgrade.dates")
+    au_reboot = bool(au_in.get("allowReboot", False))
+    use_win = bool(au_in.get("useRebootWindow", True))
+    win_lower = str(au_in.get("rebootLower", "03:00")).strip()
+    win_upper = str(au_in.get("rebootUpper", "05:30")).strip()
+    if au_reboot and use_win:
+        if not HHMM_RE.match(win_lower) or not HHMM_RE.match(win_upper):
+            raise ValueError("Fenêtre de redémarrage invalide (format attendu HH:MM).")
+
+    so_auto = bool(so_in.get("autoOptimiseStore", False))
+    so_periodic = bool(so_in.get("periodicEnable", False))
+    so_dates = validate_calendar_expr(so_in.get("periodicDates", "03:45"), "nix.optimise.dates")
+
+    return {
+        "autoUpgrade": {
+            "enable": au_enable,
+            "dates": au_dates,
+            "allowReboot": au_reboot,
+            "useRebootWindow": use_win,
+            "rebootLower": win_lower,
+            "rebootUpper": win_upper,
+        },
+        "storeOptimise": {
+            "autoOptimiseStore": so_auto,
+            "periodicEnable": so_periodic,
+            "periodicDates": so_dates,
+        },
+    }
+
+
 def main() -> int:
     # Survit aux déconnexions/reloads temporaires de Cockpit ou dbus-broker pendant nixos-rebuild
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
@@ -751,6 +917,7 @@ def main() -> int:
                 "telemetry": read_hwmon_telemetry(),
                 "updates": load_updates_cache(),
                 "system_info": check_reboot_required(),
+                "automation": read_automation_status(state),
             }))
             return 0
 
@@ -929,6 +1096,13 @@ def main() -> int:
 
         if cmd == "updates-apply":
             cmd_updates_apply()
+            return 0
+
+        if cmd == "automation-set" and len(sys.argv) >= 3:
+            payload = json.loads(sys.argv[2])
+            state = load_state()
+            state["automation"] = validate_automation(payload)
+            apply_state_transactional(state, mode="switch")
             return 0
 
         if cmd == "reboot":

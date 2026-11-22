@@ -456,10 +456,59 @@
     }
   }
 
+  function updateAutomationFieldStates() {
+    var auEn = $("auto-upg-enable");
+    var auRb = $("auto-upg-reboot");
+    var auDates = $("auto-upg-dates");
+    var winLow = $("auto-upg-win-lower");
+    var winUp = $("auto-upg-win-upper");
+    var optPer = $("opt-periodic-enable");
+    var optDates = $("opt-periodic-dates");
+
+    if (auDates && auEn) auDates.disabled = !auEn.checked;
+    if (auRb && auEn) auRb.disabled = !auEn.checked;
+    var winDisabled = !auEn || !auEn.checked || !auRb || !auRb.checked;
+    if (winLow) winLow.disabled = winDisabled;
+    if (winUp) winUp.disabled = winDisabled;
+    if (optDates && optPer) optDates.disabled = !optPer.checked;
+  }
+
+  function renderAutomation(auto) {
+    if (!auto || !$("form-automation")) return;
+    var au = auto.autoUpgrade || {};
+    var so = auto.storeOptimise || {};
+
+    setLabel("auto-upg-badge", au.liveActive ? "Actif" : "Inactif", au.liveActive ? "pf-m-green" : "");
+    if ($("auto-upg-next")) {
+      $("auto-upg-next").textContent = au.liveActive
+        ? ("Prochaine exécution : " + (au.nextElapse || "planifiée"))
+        : "Timer nixos-upgrade.timer inactif";
+    }
+    if ($("auto-upg-enable")) $("auto-upg-enable").checked = Boolean(au.enable);
+    if ($("auto-upg-dates")) $("auto-upg-dates").value = au.dates || "03:30";
+    if ($("auto-upg-reboot")) $("auto-upg-reboot").checked = Boolean(au.allowReboot);
+    if ($("auto-upg-win-lower")) $("auto-upg-win-lower").value = au.rebootLower || "03:00";
+    if ($("auto-upg-win-upper")) $("auto-upg-win-upper").value = au.rebootUpper || "05:30";
+
+    var optActive = Boolean(so.liveAutoOptimiseStore);
+    setLabel("opt-store-badge", optActive ? "auto-optimise-store : Actif" : "auto-optimise-store : Inactif", optActive ? "pf-m-green" : "");
+    if ($("opt-timer-next")) {
+      $("opt-timer-next").textContent = so.livePeriodicActive
+        ? ("Optimisation périodique active (prochaine : " + (so.nextElapse || "planifiée") + ")")
+        : "Optimisation périodique (nix-optimise.timer) inactive";
+    }
+    if ($("opt-auto-store")) $("opt-auto-store").checked = Boolean(so.autoOptimiseStore);
+    if ($("opt-periodic-enable")) $("opt-periodic-enable").checked = Boolean(so.periodicEnable);
+    if ($("opt-periodic-dates")) $("opt-periodic-dates").value = so.periodicDates || "03:45";
+
+    updateAutomationFieldStates();
+  }
+
   function refreshAll() {
     return spawnCtlRead(["status"]).then(function (raw) {
       var data = JSON.parse(raw);
       renderUpdatesAndStatus(data);
+      renderAutomation(data.automation);
       renderGenerations(data.generations);
       renderPackages(data.state.packages);
       renderTelemetry(data.telemetry);
@@ -520,6 +569,30 @@
 
     on("btn-optimise", "click", function () {
       spawnCtlWrite(["optimise-store"], "Optimisation Nix Store (déduplication hardlinks)");
+    });
+
+    on("auto-upg-enable", "change", updateAutomationFieldStates);
+    on("auto-upg-reboot", "change", updateAutomationFieldStates);
+    on("opt-periodic-enable", "change", updateAutomationFieldStates);
+
+    on("form-automation", "submit", function (e) {
+      e.preventDefault();
+      var payload = JSON.stringify({
+        autoUpgrade: {
+          enable: $("auto-upg-enable").checked,
+          dates: $("auto-upg-dates").value.trim() || "03:30",
+          allowReboot: $("auto-upg-reboot").checked,
+          useRebootWindow: Boolean($("auto-upg-win-lower").value && $("auto-upg-win-upper").value),
+          rebootLower: $("auto-upg-win-lower").value || "03:00",
+          rebootUpper: $("auto-upg-win-upper").value || "05:30"
+        },
+        storeOptimise: {
+          autoOptimiseStore: $("opt-auto-store").checked,
+          periodicEnable: $("opt-periodic-enable").checked,
+          periodicDates: $("opt-periodic-dates").value.trim() || "03:45"
+        }
+      });
+      spawnCtlWrite(["automation-set", payload], "Mise à jour des réglages d'automatisation & Store");
     });
 
     on("form-add-pkg", "submit", function (e) {
