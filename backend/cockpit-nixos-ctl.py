@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -27,6 +28,7 @@ BACKUP_DIR = STATE_DIR / "backups"
 MANAGED_NIX = Path("/etc/nixos/cockpit-managed.nix")
 LOCK_FILE = Path("/run/lock/cockpit-nixos.lock")
 REBUILD_SENTINEL = Path("/run/cockpit-nixos/rebuilding")
+LAST_JOB_LOG = Path("/run/cockpit-nixos/last-job.log")
 SYSTEM_PROFILE = Path("/nix/var/nix/profiles/system")
 
 PKG_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._+-]*(?:\.[a-zA-Z0-9][a-zA-Z0-9._+-]*)*$")
@@ -46,7 +48,7 @@ DEFAULT_STATE = {
         "enable": True,
         "allowedTCPPorts": [],
         "allowedUDPPorts": [],
-        "trustedInterfaces": ["podman0", "virbr0"],
+        "trustedInterfaces": [],
     },
     "network": {
         "hostname": "",
@@ -115,20 +117,21 @@ def render_managed_nix(state: dict) -> str:
         lines.append("")
 
     fw = state.get("firewall", {})
-    lines.append("  networking.firewall = {")
-    if fw.get("enable") is False:
-        lines.append("    enable = lib.mkForce false;")
     tcp_ports = sorted(set(int(p) for p in fw.get("allowedTCPPorts", [])))
     udp_ports = sorted(set(int(p) for p in fw.get("allowedUDPPorts", [])))
     trusted = sorted(set(fw.get("trustedInterfaces", [])))
-    if tcp_ports:
-        lines.append("    allowedTCPPorts = [ " + " ".join(str(p) for p in tcp_ports) + " ];")
-    if udp_ports:
-        lines.append("    allowedUDPPorts = [ " + " ".join(str(p) for p in udp_ports) + " ];")
-    if trusted:
-        lines.append("    trustedInterfaces = [ " + " ".join(nix_str(i) for i in trusted) + " ];")
-    lines.append("  };")
-    lines.append("")
+    if fw.get("enable") is False or tcp_ports or udp_ports or trusted:
+        lines.append("  networking.firewall = {")
+        if fw.get("enable") is False:
+            lines.append("    enable = lib.mkForce false;")
+        if tcp_ports:
+            lines.append("    allowedTCPPorts = [ " + " ".join(str(p) for p in tcp_ports) + " ];")
+        if udp_ports:
+            lines.append("    allowedUDPPorts = [ " + " ".join(str(p) for p in udp_ports) + " ];")
+        if trusted:
+            lines.append("    trustedInterfaces = [ " + " ".join(nix_str(i) for i in trusted) + " ];")
+        lines.append("  };")
+        lines.append("")
 
     net = state.get("network", {})
     hostname = (net.get("hostname") or "").strip()
@@ -181,8 +184,30 @@ def render_managed_nix(state: dict) -> str:
     return "\n".join(lines)
 
 
+_STDOUT_CLOSED = False
+
+
+def safe_log(text: str) -> None:
+    """Écrit sur stdout sans jamais lever BrokenPipeError si Cockpit se recharge
+    pendant switch-to-configuration (ex. reload dbus-broker/polkit), et journalise
+    aussi dans /run/cockpit-nixos/last-job.log."""
+    global _STDOUT_CLOSED
+    try:
+        LAST_JOB_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with LAST_JOB_LOG.open("a", encoding="utf-8") as log_fh:
+            log_fh.write(text)
+    except OSError:
+        pass
+    if not _STDOUT_CLOSED:
+        try:
+            sys.stdout.write(text)
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError):
+            _STDOUT_CLOSED = True
+
+
 def stream_cmd(cmd: list, check: bool = True) -> int:
-    print("$ " + " ".join(cmd), flush=True)
+    safe_log("$ " + " ".join(cmd) + "\n")
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -192,8 +217,7 @@ def stream_cmd(cmd: list, check: bool = True) -> int:
     )
     assert proc.stdout is not None
     for line in proc.stdout:
-        sys.stdout.write(line)
-        sys.stdout.flush()
+        safe_log(line)
     rc = proc.wait()
     if check and rc != 0:
         raise RuntimeError("Commande échouée (code " + str(rc) + ") : " + " ".join(cmd))
@@ -256,7 +280,7 @@ def apply_state_transactional(new_state: dict, mode: str = "switch") -> None:
             f.write(nix_content)
         os.chmod(tmp_nix, 0o644)
 
-        print("[1/3] Validation syntaxique Nix (nix-instantiate --parse)...", flush=True)
+        safe_log("[1/3] Validation syntaxique Nix (nix-instantiate --parse)...\n")
         rc = stream_cmd(["nix-instantiate", "--parse", str(tmp_nix)], check=False)
         if rc != 0:
             tmp_nix.unlink(missing_ok=True)
@@ -272,11 +296,11 @@ def apply_state_transactional(new_state: dict, mode: str = "switch") -> None:
         REBUILD_SENTINEL.write_text(str(os.getpid()), encoding="utf-8")
         try:
             action = "dry-build" if mode == "dry-build" else "switch"
-            print("[2/3] Exécution de nixos-rebuild " + action + "...", flush=True)
+            safe_log("[2/3] Exécution de nixos-rebuild " + action + "...\n")
             stream_cmd(["nixos-rebuild", action], check=True)
-            print("[3/3] Configuration NixOS appliquée avec succès.", flush=True)
+            safe_log("[3/3] Configuration NixOS appliquée avec succès.\n")
         except Exception:
-            print("[ROLLBACK] Échec de nixos-rebuild : restauration de l'état sain précédent...", flush=True)
+            safe_log("[ROLLBACK] Échec de nixos-rebuild : restauration de l'état sain précédent...\n")
             if had_old_nix and old_nix_backup.exists():
                 shutil.copy2(old_nix_backup, MANAGED_NIX)
             else:
@@ -391,10 +415,10 @@ def cmd_updates_check() -> None:
     ensure_root()
 
     def _check():
-        print("[1/3] Mise à jour des canaux NixOS (nix-channel --update)...", flush=True)
+        safe_log("[1/3] Mise à jour des canaux NixOS (nix-channel --update)...\n")
         stream_cmd(["nix-channel", "--update"], check=False)
 
-        print("[2/3] Évaluation de la prochaine génération (nixos-rebuild build --no-out-link)...", flush=True)
+        safe_log("[2/3] Évaluation de la prochaine génération (nixos-rebuild build --no-out-link)...\n")
         eval_res = subprocess.run(
             ["nixos-rebuild", "build", "--no-out-link"],
             capture_output=True,
@@ -402,8 +426,7 @@ def cmd_updates_check() -> None:
             timeout=600,
         )
         if eval_res.stderr:
-            sys.stdout.write(eval_res.stderr)
-            sys.stdout.flush()
+            safe_log(eval_res.stderr)
         if eval_res.returncode != 0:
             raise RuntimeError("Échec de l'évaluation NixOS (code " + str(eval_res.returncode) + ").")
 
@@ -417,7 +440,7 @@ def cmd_updates_check() -> None:
         current_sys = os.path.realpath("/run/current-system")
         updates = []
         if target_path and Path(target_path).exists() and os.path.realpath(target_path) != current_sys:
-            print("[3/3] Calcul des différences de paquets (nix store diff-closures)...", flush=True)
+            safe_log("[3/3] Calcul des différences de paquets (nix store diff-closures)...\n")
             diff_res = subprocess.run(
                 ["nix", "--extra-experimental-features", "nix-command", "store", "diff-closures", current_sys, target_path],
                 capture_output=True,
@@ -464,9 +487,9 @@ def cmd_updates_check() -> None:
 
         save_updates_cache(updates)
         if updates:
-            print("Vérification terminée : " + str(len(updates)) + " mise(s) à jour disponible(s).", flush=True)
+            safe_log("Vérification terminée : " + str(len(updates)) + " mise(s) à jour disponible(s).\n")
         else:
-            print("Vérification terminée : le système NixOS est à jour.", flush=True)
+            safe_log("Vérification terminée : le système NixOS est à jour.\n")
 
     with_lock(_check)
 
@@ -478,10 +501,10 @@ def cmd_updates_apply() -> None:
         REBUILD_SENTINEL.parent.mkdir(parents=True, exist_ok=True)
         REBUILD_SENTINEL.write_text(str(os.getpid()), encoding="utf-8")
         try:
-            print("[1/2] Application des mises à jour NixOS (nixos-rebuild switch --upgrade)...", flush=True)
+            safe_log("[1/2] Application des mises à jour NixOS (nixos-rebuild switch --upgrade)...\n")
             stream_cmd(["nixos-rebuild", "switch", "--upgrade"], check=True)
             save_updates_cache([])
-            print("[2/2] Mises à jour appliquées sur une nouvelle génération NixOS.", flush=True)
+            safe_log("[2/2] Mises à jour appliquées sur une nouvelle génération NixOS.\n")
         finally:
             REBUILD_SENTINEL.unlink(missing_ok=True)
 
@@ -717,6 +740,9 @@ def sync_nm_profiles_from_cli() -> dict:
 
 
 def main() -> int:
+    # Survit aux déconnexions/reloads temporaires de Cockpit ou dbus-broker pendant nixos-rebuild
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
     ensure_nix_env()
     if len(sys.argv) < 2:
         print("Usage: cockpit-nixos-ctl <command> [args...]", file=sys.stderr)

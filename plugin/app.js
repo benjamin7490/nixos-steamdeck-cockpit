@@ -137,7 +137,6 @@
 
   function spawnCtlRead(args) {
     return cockpit.spawn([CTL_BIN].concat(args), {
-      superuser: "try",
       err: "message"
     });
   }
@@ -152,8 +151,10 @@
     setJobStatus("En cours...", "pf-m-blue");
     resetLog(title);
 
-    var proc = cockpit.spawn([CTL_BIN].concat(args), {
-      superuser: "require",
+    /* Passe par sudo -n (règle NOPASSWD dédiée à cockpit-nixos-ctl) plutôt que le
+       bridge Polkit (superuser: "require"), car nixos-rebuild switch redémarre
+       polkit.service et recharge dbus-broker.service lors de l'activation ! */
+    var proc = cockpit.spawn(["/run/wrappers/bin/sudo", "-n", CTL_BIN].concat(args), {
       err: "out"
     });
 

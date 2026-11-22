@@ -443,10 +443,16 @@ in
       };
 
       # -------------------------------------------------------------------------
-      # 4. Réseau (NetworkManager), Pare-feu (FirewallD1) & Mises à jour (PackageKit)
+      # 4. Réseau (NetworkManager), Pare-feu atomique (nftables + FirewallD1) & PackageKit
       # -------------------------------------------------------------------------
       networking.networkmanager.enable = lib.mkDefault true;
-      networking.firewall.enable = lib.mkDefault true;
+      networking.nftables.enable = lib.mkDefault true;
+      networking.firewall = {
+        enable = lib.mkDefault true;
+        trustedInterfaces =
+          lib.optional cfg.enablePodman "podman0"
+          ++ lib.optional cfg.enableMachines "virbr0";
+      };
 
       # Watchers d'interception NetworkManager -> /etc/nixos/cockpit-managed.nix
       systemd.paths.cockpit-nixos-net-intercept = lib.mkIf cfg.enableNetworkInterception {
@@ -661,12 +667,12 @@ in
     # Watchdog matériel systemd (compatible NixOS 25.05+/unstable et fallback 24.11)
     (if (options.systemd ? settings && options.systemd.settings ? Manager) then {
       systemd.settings.Manager = lib.mkIf cfg.enableHealthChecker {
-        RuntimeWatchdogSec = lib.mkDefault "30s";
+        RuntimeWatchdogSec = lib.mkDefault "60s";
         RebootWatchdogSec = lib.mkDefault "2min";
       };
     } else {
       systemd.watchdog = lib.mkIf cfg.enableHealthChecker {
-        runtimeTime = lib.mkDefault "30s";
+        runtimeTime = lib.mkDefault "60s";
         rebootTime = lib.mkDefault "2min";
       };
     })
