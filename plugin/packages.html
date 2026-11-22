@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Paquets NixOS — Cockpit</title>
+  <link rel="stylesheet" href="cockpit-patternfly.css">
+  <link rel="stylesheet" href="style.css">
+  <script src="../base1/cockpit.js"></script>
+</head>
+<body data-page="packages">
+  <div class="pf-v6-c-page no-masthead-sidebar">
+    <main class="pf-v6-c-page__main" tabindex="-1">
+      <section class="pf-v6-c-page__main-section pf-m-light">
+        <div class="nixos-page-header">
+          <div>
+            <h1 class="pf-v6-c-title pf-m-2xl">Paquets NixOS</h1>
+            <p class="nixos-muted">Gestion déclarative de <code>environment.systemPackages</code> dans <code>/etc/nixos/cockpit-managed.nix</code> (remplace PackageKit).</p>
+          </div>
+          <div class="nixos-actions">
+            <span id="admin-badge" class="pf-v6-c-label pf-m-orange"><span class="pf-v6-c-label__content">Vérification droits...</span></span>
+            <button id="btn-refresh-all" class="pf-v6-c-button pf-m-secondary" type="button">Actualiser</button>
+            <button id="btn-dry-build" class="pf-v6-c-button pf-m-secondary" type="button">Dry-Build</button>
+            <button id="btn-rebuild-now" class="pf-v6-c-button pf-m-primary" type="button">Rebuild &amp; Switch</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="pf-v6-c-page__main-section">
+        <div class="nixos-stack">
+          <div id="alert-banner" class="pf-v6-c-alert pf-m-inline nixos-hidden" role="alert">
+            <h4 id="alert-title" class="pf-v6-c-alert__title"></h4>
+          </div>
+
+          <div class="pf-v6-c-card">
+            <div class="pf-v6-c-card__header">
+              <div class="pf-v6-c-card__title">
+                <h2 class="pf-v6-c-title pf-m-lg">Rechercher et installer depuis <code>nixpkgs</code></h2>
+              </div>
+            </div>
+            <div class="pf-v6-c-card__body">
+              <form id="form-add-pkg" class="nixos-inline-form">
+                <span class="pf-v6-c-form-control">
+                  <input id="input-pkg-name" type="text" placeholder="Attribut nixpkgs (ex : htop, btop, ncdu, tailscale, rclone)" required autocomplete="off">
+                </span>
+                <button class="pf-v6-c-button pf-m-primary" type="submit">Ajouter &amp; Rebuild</button>
+                <button id="btn-search-pkg" class="pf-v6-c-button pf-m-secondary" type="button">Rechercher</button>
+              </form>
+              <div id="pkg-search-results" class="nixos-search-box nixos-hidden"></div>
+            </div>
+          </div>
+
+          <div class="pf-v6-c-card">
+            <div class="pf-v6-c-card__header">
+              <div class="pf-v6-c-card__title">
+                <h2 class="pf-v6-c-title pf-m-lg">Paquets installés via Cockpit (<span id="metric-pkgs">0</span>)</h2>
+              </div>
+            </div>
+            <div class="pf-v6-c-card__body">
+              <table class="pf-v6-c-table pf-m-grid-md pf-m-compact" role="grid">
+                <thead class="pf-v6-c-table__thead">
+                  <tr class="pf-v6-c-table__tr">
+                    <th class="pf-v6-c-table__th" scope="col">Attribut Nixpkgs</th>
+                    <th class="pf-v6-c-table__th" scope="col">Déclaré dans</th>
+                    <th class="pf-v6-c-table__th" scope="col">Action</th>
+                  </tr>
+                </thead>
+                <tbody id="packages-tbody" class="pf-v6-c-table__tbody">
+                  <tr class="pf-v6-c-table__tr"><td colspan="3" class="pf-v6-c-table__td nixos-muted">Chargement des paquets...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="pf-v6-c-card">
+            <div class="pf-v6-c-card__header">
+              <div class="pf-v6-c-card__title">
+                <h2 class="pf-v6-c-title pf-m-md">Journal d'exécution temps réel</h2>
+              </div>
+              <div class="pf-v6-c-card__actions">
+                <div class="nixos-actions">
+                  <span id="job-status" class="pf-v6-c-label"><span class="pf-v6-c-label__content">Prêt</span></span>
+                  <button id="btn-clear-log" class="pf-v6-c-button pf-m-secondary pf-m-small" type="button">Effacer</button>
+                </div>
+              </div>
+            </div>
+            <div class="pf-v6-c-card__body">
+              <pre id="console-output" class="nixos-console">En attente d'action...</pre>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -12,14 +12,13 @@ A NixOS module and **Cockpit** plugin that bring the full Cockpit ecosystem (`co
 
 ## Features
 
-- **Native Cockpit Plugin ("NixOS Déclaratif")** integrated into Cockpit's main navigation:
-  - View NixOS system generations, switch generations atomically, **Roll back** with one click, run **`nix-collect-garbage -d`**, and optimize the Nix store (`nix-store --optimise`) with live streamed logs.
-  - Declaratively manage **Nix packages** (search `nixpkgs`, add/remove), **firewall rules**, **network settings**, and **`fileSystems` mounts** for `cockpit-files`.
-  - Live dashboard for **Health-Checker** status, automatic upgrades, and **`hwmon` hardware telemetry** (Steam Deck fan RPM & APU temperature).
-- **Declarative Interception into `/etc/nixos/cockpit-managed.nix`**:
-  - **Networking**: watches changes made through Cockpit's native *Networking* UI (`NetworkManager`) and syncs persistent profiles into `networking.networkmanager.ensureProfiles.profiles` (with 3 s debounce, SHA-256 anti-loop guard, and automatic filtering of ephemeral Podman/Libvirt/veth interfaces).
-  - **Firewall**: exposes a lightweight D-Bus bridge (`org.fedoraproject.FirewallD1`) so Cockpit's *Firewall* UI works seamlessly while keeping NixOS's native declarative firewall (`networking.firewall`).
-  - **Packages**: hides the incompatible `PackageKit` tab via `override.json` and routes all package changes into `environment.systemPackages`.
+- **Native Cockpit Integration (PatternFly 6 + separate sidebar tabs)** — reuses Cockpit's own compiled PatternFly 6 CSS (including live Light/Dark theme sync) and existing Cockpit modules:
+  - **Générations NixOS**: list NixOS generations, switch generations atomically, **Roll back** with one click, run **`nix-collect-garbage -d`**, optimize the Nix store, monitor the **MicroOS-style Health-Checker**, and view live **`hwmon` hardware telemetry** (Steam Deck fan RPM & APU temperature).
+  - **Paquets NixOS**: replaces the incompatible `PackageKit` tab (hidden via `override.json`) with declarative `nixpkgs` search and `environment.systemPackages` management.
+  - **Configuration NixOS**: manages declarative `fileSystems` mounts (linked directly to Cockpit's native **Files** and **Storage** modules), hostname/DNS/trusted interfaces, live preview of `/etc/nixos/cockpit-managed.nix`, and direct links to Cockpit's native **Networking & Firewall** module.
+- **Declarative Interception into `/etc/nixos/cockpit-managed.nix`** using Cockpit's existing native modules:
+  - **Networking** (native Cockpit *Networking* tab): watches `NetworkManager` profile changes and syncs them into `networking.networkmanager.ensureProfiles.profiles` (3 s debounce, SHA-256 anti-loop guard, ephemeral Podman/Libvirt/veth filtering).
+  - **Firewall** (native Cockpit *Networking → Firewall* UI): registers a full `org.fedoraproject.FirewallD1` D-Bus bridge (aliased as `firewalld.service`) that translates every Cockpit Firewall UI action directly into NixOS's native `networking.firewall` without running imperative `firewalld`.
 - **Full Virtualization, Containers & Storage Stack**:
   - **Podman** (`cockpit-podman`, `dockerCompat`, `dockerSocket`, internal DNS, `podman-compose`, weekly `autoPrune`).
   - **KVM / QEMU** (`cockpit-machines`, `libvirtd`, `libvirt-dbus`, `virt-manager`, `swtpm`).
@@ -212,9 +211,11 @@ flowchart TB
 ├── nixos/
 │   ├── cockpit-nixos-module.nix            # Generic reusable NixOS module (services.cockpit-nixos.*)
 │   └── configuration.nix                   # Full reference configuration.nix
-├── plugin/                                 # Cockpit frontend (strict CSP, zero inline JS)
-│   ├── manifest.json
-│   ├── index.html
+├── plugin/                                 # Cockpit frontend (exact Cockpit PatternFly 6 CSS, strict CSP)
+│   ├── manifest.json                       # Registers 3 separate Cockpit sidebar entries
+│   ├── generations.html                    # Generations, Rollback, GC, Health-Checker & hwmon
+│   ├── packages.html                       # Declarative Nix package manager
+│   ├── config.html                         # Mounts, cockpit-managed.nix preview & native module links
 │   ├── style.css
 │   └── app.js
 └── backend/                                # Python 3 CLI & background services

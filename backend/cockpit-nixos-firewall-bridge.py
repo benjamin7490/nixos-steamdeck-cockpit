@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """
-cockpit-nixos-firewall-bridge : Shim D-Bus léger (org.fedoraproject.FirewallD1)
-qui intercepte les actions de la page native 'Networking -> Firewall' de Cockpit
-et les redirige vers /etc/nixos/cockpit-managed.nix (networking.firewall) +
-nixos-rebuild switch via cockpit-nixos-ctl.
+cockpit-nixos-firewall-bridge : Bridge D-Bus complet (org.fedoraproject.FirewallD1)
+reliant directement l'interface native 'Réseau -> Pare-feu' de Cockpit au pare-feu
+déclaratif natif NixOS (/etc/nixos/cockpit-managed.nix -> networking.firewall).
 
-Permet de conserver le pare-feu natif déclaratif NixOS (nftables/iptables) sans
-installer le démon firewalld impératif.
+Expose :
+  - /org/fedoraproject/FirewallD1          (org.fedoraproject.FirewallD1 + .zone)
+  - /org/fedoraproject/FirewallD1/config   (org.fedoraproject.FirewallD1.config)
+  - /org/fedoraproject/FirewallD1/config/zone/0
+  - /org/fedoraproject/FirewallD1/config/service/<idx>
+
+Enregistré avec l'alias systemd `firewalld.service` afin que le module natif
+Cockpit Networking détecte et pilote nativement le pare-feu NixOS sans installer
+le démon impératif firewalld.
 """
 
 import json
@@ -25,36 +31,48 @@ CTL_BIN = "/run/current-system/sw/bin/cockpit-nixos-ctl"
 
 BUS_NAME = "org.fedoraproject.FirewallD1"
 OBJ_PATH = "/org/fedoraproject/FirewallD1"
+CONFIG_PATH = "/org/fedoraproject/FirewallD1/config"
+ZONE_PATH = "/org/fedoraproject/FirewallD1/config/zone/0"
 
+# Catalogue des services standards reconnus par Cockpit Firewall UI
 KNOWN_SERVICES = {
-    "ssh": [(22, "tcp")],
-    "cockpit": [(9090, "tcp")],
-    "http": [(80, "tcp")],
-    "https": [(443, "tcp")],
-    "dns": [(53, "tcp"), (53, "udp")],
-    "samba": [(139, "tcp"), (445, "tcp")],
-    "nfs": [(2049, "tcp")],
-    "vnc-server": [(5900, "tcp")],
-    "mdns": [(5353, "udp")],
-    "wireguard": [(51820, "udp")],
-    "mqtt": [(1883, "tcp")],
+    "cockpit":     ("Cockpit", "Interface web d'administration Cockpit", [(9090, "tcp")]),
+    "ssh":         ("SSH", "Serveur Secure Shell (OpenSSH)", [(22, "tcp")]),
+    "http":        ("HTTP", "Serveur web HTTP", [(80, "tcp")]),
+    "https":       ("HTTPS", "Serveur web HTTPS", [(443, "tcp")]),
+    "dns":         ("DNS", "Serveur de noms de domaine", [(53, "tcp"), (53, "udp")]),
+    "dhcp":        ("DHCP", "Serveur DHCP", [(67, "udp")]),
+    "mdns":        ("mDNS", "Découverte réseau local Avahi / mDNS", [(5353, "udp")]),
+    "samba":       ("Samba", "Partage de fichiers SMB/CIFS", [(139, "tcp"), (445, "tcp")]),
+    "nfs":         ("NFS", "Partage réseau NFS", [(2049, "tcp")]),
+    "vnc-server":  ("VNC", "Bureau à distance VNC", [(5900, "tcp")]),
+    "wireguard":   ("WireGuard", "VPN WireGuard", [(51820, "udp")]),
+    "mqtt":        ("MQTT", "Broker domotique MQTT", [(1883, "tcp")]),
+    "syncthing":   ("Syncthing", "Synchronisation de fichiers Syncthing", [(22000, "tcp"), (22000, "udp"), (21027, "udp")]),
+    "postgresql":  ("PostgreSQL", "Base de données PostgreSQL", [(5432, "tcp")]),
+    "mysql":       ("MySQL / MariaDB", "Base de données MySQL/MariaDB", [(3306, "tcp")]),
+    "redis":       ("Redis", "Cache / base clé-valeur Redis", [(6379, "tcp")]),
+    "grafana":     ("Grafana", "Tableaux de bord Grafana", [(3000, "tcp")]),
+    "prometheus":  ("Prometheus", "Métriques Prometheus", [(9090, "tcp")]),
 }
+
+SERVICE_LIST = sorted(KNOWN_SERVICES.keys())
 
 
 def read_fw_state() -> dict:
     if not STATE_FILE.exists():
-        return {"enable": True, "allowedTCPPorts": [9090], "allowedUDPPorts": [], "trustedInterfaces": []}
-    data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    return data.get("firewall", {"enable": True, "allowedTCPPorts": [], "allowedUDPPorts": [], "trustedInterfaces": []})
+        return {"enable": True, "allowedTCPPorts": [9090], "allowedUDPPorts": [], "trustedInterfaces": ["podman0", "virbr0"]}
+    try:
+        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        return data.get("firewall", {"enable": True, "allowedTCPPorts": [], "allowedUDPPorts": [], "trustedInterfaces": []})
+    except Exception:
+        return {"enable": True, "allowedTCPPorts": [], "allowedUDPPorts": [], "trustedInterfaces": []}
 
 
-def ports_as_dbus_array() -> list:
+def ports_as_pairs() -> list:
     fw = read_fw_state()
-    out = []
-    for p in fw.get("allowedTCPPorts", []):
-        out.append((str(p), "tcp"))
-    for p in fw.get("allowedUDPPorts", []):
-        out.append((str(p), "udp"))
+    out = [(str(p), "tcp") for p in fw.get("allowedTCPPorts", [])]
+    out += [(str(p), "udp") for p in fw.get("allowedUDPPorts", [])]
     return out
 
 
@@ -63,10 +81,95 @@ def active_services() -> list:
     tcp = set(int(p) for p in fw.get("allowedTCPPorts", []))
     udp = set(int(p) for p in fw.get("allowedUDPPorts", []))
     found = []
-    for svc, reqs in KNOWN_SERVICES.items():
+    for svc in SERVICE_LIST:
+        _, _, reqs = KNOWN_SERVICES[svc]
         if all((p in tcp if proto == "tcp" else p in udp) for p, proto in reqs):
             found.append(svc)
     return found
+
+
+def make_service_settings_v1(svc: str):
+    if svc not in KNOWN_SERVICES:
+        raise dbus.DBusException("INVALID_SERVICE: " + svc)
+    short, desc, reqs = KNOWN_SERVICES[svc]
+    ports = dbus.Array([(str(p), proto) for p, proto in reqs], signature="(ss)")
+    return (
+        dbus.String("1.0"),
+        dbus.String(short),
+        dbus.String(desc),
+        ports,
+        dbus.Array([], signature="s"),
+        dbus.Dictionary({}, signature="ss"),
+        dbus.Array([], signature="s"),
+        dbus.Array([], signature="(ss)"),
+    )
+
+
+def make_service_settings_v2(svc: str):
+    if svc not in KNOWN_SERVICES:
+        raise dbus.DBusException("INVALID_SERVICE: " + svc)
+    short, desc, reqs = KNOWN_SERVICES[svc]
+    return dbus.Dictionary({
+        "version": dbus.String("1.0"),
+        "short": dbus.String(short),
+        "description": dbus.String(desc),
+        "ports": dbus.Array([(str(p), proto) for p, proto in reqs], signature="(ss)"),
+        "protocols": dbus.Array([], signature="s"),
+        "modules": dbus.Array([], signature="s"),
+    }, signature="sv")
+
+
+def make_zone_settings_v1():
+    fw = read_fw_state()
+    ifaces = dbus.Array(fw.get("trustedInterfaces", []) or [], signature="s")
+    services = dbus.Array(active_services(), signature="s")
+    ports = dbus.Array([(p, proto) for p, proto in ports_as_pairs()], signature="(ss)")
+    return (
+        dbus.String("1.0"),
+        dbus.String("NixOS"),
+        dbus.String("Pare-feu déclaratif NixOS (/etc/nixos/cockpit-managed.nix)"),
+        dbus.Boolean(False),
+        dbus.String("default"),
+        services,
+        ports,
+        dbus.Array([], signature="s"),
+        dbus.Boolean(False),
+        dbus.Array([], signature="(ssss)"),
+        ifaces,
+        dbus.Array([], signature="s"),
+        dbus.Array([], signature="s"),
+    )
+
+
+def make_zone_settings_v2():
+    fw = read_fw_state()
+    return dbus.Dictionary({
+        "version": dbus.String("1.0"),
+        "short": dbus.String("NixOS"),
+        "description": dbus.String("Pare-feu déclaratif NixOS (/etc/nixos/cockpit-managed.nix)"),
+        "target": dbus.String("default"),
+        "services": dbus.Array(active_services(), signature="s"),
+        "ports": dbus.Array([(p, proto) for p, proto in ports_as_pairs()], signature="(ss)"),
+        "interfaces": dbus.Array(fw.get("trustedInterfaces", []) or [], signature="s"),
+        "sources": dbus.Array([], signature="s"),
+        "forward_ports": dbus.Array([], signature="(ssss)"),
+        "rich_rules": dbus.Array([], signature="s"),
+        "protocols": dbus.Array([], signature="s"),
+        "masquerade": dbus.Boolean(False),
+    }, signature="sv")
+
+
+def validate_port_proto(port, protocol) -> tuple:
+    try:
+        p_int = int(str(port).strip())
+        if p_int < 1 or p_int > 65535:
+            raise ValueError("Port hors plage")
+    except ValueError as exc:
+        raise dbus.DBusException("INVALID_PORT: " + str(exc))
+    proto = str(protocol).lower().strip()
+    if proto not in ("tcp", "udp"):
+        raise dbus.DBusException("INVALID_PROTOCOL: " + proto)
+    return (str(p_int), proto)
 
 
 def run_ctl_async(args: list, callback=None) -> None:
@@ -80,88 +183,228 @@ def run_ctl_async(args: list, callback=None) -> None:
     threading.Thread(target=_worker, daemon=True).start()
 
 
+class ConfigServiceObject(dbus.service.Object):
+    def __init__(self, bus_name, idx: int, svc: str):
+        self.svc = svc
+        super().__init__(bus_name, CONFIG_PATH + "/service/" + str(idx))
+
+    @dbus.service.method(BUS_NAME + ".config.service", out_signature="(sssa(ss)asa{ss}asa(ss))")
+    def getSettings(self):
+        return make_service_settings_v1(self.svc)
+
+    @dbus.service.method(BUS_NAME + ".config.service", out_signature="a{sv}")
+    def getSettings2(self):
+        return make_service_settings_v2(self.svc)
+
+    @dbus.service.method(BUS_NAME + ".config.service", out_signature="a(ss)")
+    def getPorts(self):
+        _, _, reqs = KNOWN_SERVICES[self.svc]
+        return dbus.Array([(str(p), proto) for p, proto in reqs], signature="(ss)")
+
+    @dbus.service.method(BUS_NAME + ".config.service", out_signature="s")
+    def getShort(self):
+        return KNOWN_SERVICES[self.svc][0]
+
+    @dbus.service.method(BUS_NAME + ".config.service", out_signature="s")
+    def getDescription(self):
+        return KNOWN_SERVICES[self.svc][1]
+
+
+class ConfigZoneObject(dbus.service.Object):
+    def __init__(self, bus_name, root_obj):
+        self.root_obj = root_obj
+        super().__init__(bus_name, ZONE_PATH)
+
+    @dbus.service.method(BUS_NAME + ".config.zone", out_signature="s")
+    def getName(self):
+        return "nixos"
+
+    @dbus.service.method(BUS_NAME + ".config.zone", out_signature="(sssbsasa(ss)asba(ssss)asasas)")
+    def getSettings(self):
+        return make_zone_settings_v1()
+
+    @dbus.service.method(BUS_NAME + ".config.zone", out_signature="a{sv}")
+    def getSettings2(self):
+        return make_zone_settings_v2()
+
+    @dbus.service.method(BUS_NAME + ".config.zone", out_signature="as")
+    def getServices(self):
+        return dbus.Array(active_services(), signature="s")
+
+    @dbus.service.method(BUS_NAME + ".config.zone", out_signature="a(ss)")
+    def getPorts(self):
+        return dbus.Array([(p, proto) for p, proto in ports_as_pairs()], signature="(ss)")
+
+    @dbus.service.method(BUS_NAME + ".config.zone", out_signature="as")
+    def getInterfaces(self):
+        return dbus.Array(read_fw_state().get("trustedInterfaces", []) or [], signature="s")
+
+    @dbus.service.method(BUS_NAME + ".config.zone", in_signature="s")
+    def addService(self, service):
+        self.root_obj.addService("nixos", service, 0)
+
+    @dbus.service.method(BUS_NAME + ".config.zone", in_signature="s")
+    def removeService(self, service):
+        self.root_obj.removeService("nixos", service)
+
+    @dbus.service.method(BUS_NAME + ".config.zone", in_signature="ss")
+    def addPort(self, port, protocol):
+        self.root_obj.addPort("nixos", port, protocol, 0)
+
+    @dbus.service.method(BUS_NAME + ".config.zone", in_signature="ss")
+    def removePort(self, port, protocol):
+        self.root_obj.removePort("nixos", port, protocol)
+
+    @dbus.service.signal(BUS_NAME + ".config.zone", signature="s")
+    def Updated(self, name):
+        pass
+
+
+class ConfigRootObject(dbus.service.Object):
+    def __init__(self, bus_name):
+        super().__init__(bus_name, CONFIG_PATH)
+
+    @dbus.service.method(BUS_NAME + ".config", out_signature="as")
+    def getZoneNames(self):
+        return dbus.Array(["nixos"], signature="s")
+
+    @dbus.service.method(BUS_NAME + ".config", out_signature="ao")
+    def listZones(self):
+        return dbus.Array([dbus.ObjectPath(ZONE_PATH)], signature="o")
+
+    @dbus.service.method(BUS_NAME + ".config", in_signature="s", out_signature="o")
+    def getZoneByName(self, zone):
+        return dbus.ObjectPath(ZONE_PATH)
+
+    @dbus.service.method(BUS_NAME + ".config", out_signature="as")
+    def getServiceNames(self):
+        return dbus.Array(SERVICE_LIST, signature="s")
+
+    @dbus.service.method(BUS_NAME + ".config", out_signature="ao")
+    def listServices(self):
+        return dbus.Array(
+            [dbus.ObjectPath(CONFIG_PATH + "/service/" + str(i)) for i in range(len(SERVICE_LIST))],
+            signature="o",
+        )
+
+    @dbus.service.method(BUS_NAME + ".config", in_signature="s", out_signature="o")
+    def getServiceByName(self, service):
+        s = str(service)
+        if s not in KNOWN_SERVICES:
+            raise dbus.DBusException("INVALID_SERVICE: " + s)
+        idx = SERVICE_LIST.index(s)
+        return dbus.ObjectPath(CONFIG_PATH + "/service/" + str(idx))
+
+
 class NixOSFirewallDShim(dbus.service.Object):
-    def __init__(self, bus):
-        bus_name = dbus.service.BusName(BUS_NAME, bus=bus)
+    def __init__(self, bus_name):
+        self.zone_cfg = None
         super().__init__(bus_name, OBJ_PATH)
+
+    def _notify_zone_updated(self):
+        if self.zone_cfg:
+            self.zone_cfg.Updated("nixos")
 
     @dbus.service.method(BUS_NAME, out_signature="s")
     def getDefaultZone(self):
         return "nixos"
 
+    @dbus.service.method(BUS_NAME, out_signature="as")
+    def listServices(self):
+        return dbus.Array(SERVICE_LIST, signature="s")
+
+    @dbus.service.method(BUS_NAME, in_signature="s", out_signature="(sssa(ss)asa{ss}asa(ss))")
+    def getServiceSettings(self, service):
+        return make_service_settings_v1(str(service))
+
+    @dbus.service.method(BUS_NAME, in_signature="s", out_signature="a{sv}")
+    def getServiceSettings2(self, service):
+        return make_service_settings_v2(str(service))
+
+    @dbus.service.method(BUS_NAME, in_signature="s", out_signature="(sssbsasa(ss)asba(ssss)asasas)")
+    def getZoneSettings(self, zone):
+        return make_zone_settings_v1()
+
+    @dbus.service.method(BUS_NAME, in_signature="s", out_signature="a{sv}")
+    def getZoneSettings2(self, zone):
+        return make_zone_settings_v2()
+
+    @dbus.service.method(BUS_NAME)
+    def authorizeAll(self):
+        return None
+
+    @dbus.service.method(BUS_NAME)
+    def runtimeToPermanent(self):
+        return None
+
+    @dbus.service.method(BUS_NAME)
+    def reload(self):
+        run_ctl_async(["rebuild"], lambda: self.Reloaded())
+
     @dbus.service.method(BUS_NAME + ".zone", out_signature="as")
     def getZones(self):
-        return ["nixos"]
+        return dbus.Array(["nixos"], signature="s")
 
     @dbus.service.method(BUS_NAME + ".zone", out_signature="a{sa{sas}}")
     def getActiveZones(self):
-        fw = read_fw_state()
-        ifaces = fw.get("trustedInterfaces", []) or ["default"]
-        return {"nixos": {"interfaces": dbus.Array(ifaces, signature="s")}}
-
-    @dbus.service.method(BUS_NAME, out_signature="as")
-    def listServices(self):
-        return sorted(KNOWN_SERVICES.keys())
+        ifaces = read_fw_state().get("trustedInterfaces", []) or []
+        return {"nixos": {"interfaces": dbus.Array(ifaces, signature="s"), "sources": dbus.Array([], signature="s")}}
 
     @dbus.service.method(BUS_NAME + ".zone", in_signature="s", out_signature="aas")
     def getPorts(self, zone):
-        return dbus.Array([dbus.Array([p, proto], signature="s") for p, proto in ports_as_dbus_array()], signature="as")
+        return dbus.Array([dbus.Array([p, proto], signature="s") for p, proto in ports_as_pairs()], signature="as")
 
     @dbus.service.method(BUS_NAME + ".zone", in_signature="s", out_signature="as")
     def getServices(self, zone):
         return dbus.Array(active_services(), signature="s")
 
+    @dbus.service.method(BUS_NAME + ".zone", in_signature="s", out_signature="as")
+    def getInterfaces(self, zone):
+        return dbus.Array(read_fw_state().get("trustedInterfaces", []) or [], signature="s")
+
     @dbus.service.method(BUS_NAME + ".zone", in_signature="sssu", out_signature="s")
     def addPort(self, zone, port, protocol, timeout):
-        try:
-            p_int = int(str(port).strip())
-            if p_int < 1 or p_int > 65535:
-                raise ValueError("Port hors plage")
-        except ValueError as exc:
-            raise dbus.DBusException("Port invalide (uniquement port numérique 1-65535) : " + str(exc))
-        p = str(p_int)
-        proto = str(protocol).lower()
-        if proto not in ("tcp", "udp"):
-            raise dbus.DBusException("Protocole non supporté : " + proto)
-        run_ctl_async(["fw-port-add", p, proto], lambda: self.PortAdded("nixos", p, proto, 0))
+        p, proto = validate_port_proto(port, protocol)
+        def _done():
+            self.PortAdded("nixos", p, proto, 0)
+            self._notify_zone_updated()
+        run_ctl_async(["fw-port-add", p, proto], _done)
         return "nixos"
 
     @dbus.service.method(BUS_NAME + ".zone", in_signature="sss", out_signature="s")
     def removePort(self, zone, port, protocol):
-        try:
-            p_int = int(str(port).strip())
-            if p_int < 1 or p_int > 65535:
-                raise ValueError("Port hors plage")
-        except ValueError as exc:
-            raise dbus.DBusException("Port invalide : " + str(exc))
-        p = str(p_int)
-        proto = str(protocol).lower()
-        if proto not in ("tcp", "udp"):
-            raise dbus.DBusException("Protocole non supporté : " + proto)
-        run_ctl_async(["fw-port-remove", p, proto], lambda: self.PortRemoved("nixos", p, proto))
+        p, proto = validate_port_proto(port, protocol)
+        def _done():
+            self.PortRemoved("nixos", p, proto)
+            self._notify_zone_updated()
+        run_ctl_async(["fw-port-remove", p, proto], _done)
         return "nixos"
 
     @dbus.service.method(BUS_NAME + ".zone", in_signature="ssu", out_signature="s")
     def addService(self, zone, service, timeout):
-        reqs = KNOWN_SERVICES.get(str(service))
-        if not reqs:
-            raise dbus.DBusException("Service pare-feu inconnu : " + str(service))
+        svc = str(service)
+        if svc not in KNOWN_SERVICES:
+            raise dbus.DBusException("INVALID_SERVICE: " + svc)
+        _, _, reqs = KNOWN_SERVICES[svc]
         payload = json.dumps([{"port": p, "proto": proto} for p, proto in reqs])
-        run_ctl_async(["fw-ports-batch", "add", payload], lambda: self.ServiceAdded("nixos", str(service), 0))
+        def _done():
+            self.ServiceAdded("nixos", svc, 0)
+            self._notify_zone_updated()
+        run_ctl_async(["fw-ports-batch", "add", payload], _done)
         return "nixos"
 
     @dbus.service.method(BUS_NAME + ".zone", in_signature="ss", out_signature="s")
     def removeService(self, zone, service):
-        reqs = KNOWN_SERVICES.get(str(service))
-        if not reqs:
-            raise dbus.DBusException("Service pare-feu inconnu : " + str(service))
+        svc = str(service)
+        if svc not in KNOWN_SERVICES:
+            raise dbus.DBusException("INVALID_SERVICE: " + svc)
+        _, _, reqs = KNOWN_SERVICES[svc]
         payload = json.dumps([{"port": p, "proto": proto} for p, proto in reqs])
-        run_ctl_async(["fw-ports-batch", "remove", payload], lambda: self.ServiceRemoved("nixos", str(service)))
+        def _done():
+            self.ServiceRemoved("nixos", svc)
+            self._notify_zone_updated()
+        run_ctl_async(["fw-ports-batch", "remove", payload], _done)
         return "nixos"
-
-    @dbus.service.method(BUS_NAME)
-    def reload(self):
-        run_ctl_async(["rebuild"], lambda: self.Reloaded())
 
     @dbus.service.signal(BUS_NAME + ".zone", signature="sssi")
     def PortAdded(self, zone, port, protocol, timeout):
@@ -188,24 +431,28 @@ class NixOSFirewallDShim(dbus.service.Object):
         if property_name == "state":
             return dbus.String("RUNNING")
         if property_name == "version":
-            return dbus.String("nixos-declarative-bridge-1.0")
+            return dbus.String("1.3.0-nixos")
         return dbus.String("")
 
     @dbus.service.method("org.freedesktop.DBus.Properties", in_signature="s", out_signature="a{sv}")
     def GetAll(self, interface_name):
         return {
             "state": dbus.String("RUNNING"),
-            "version": dbus.String("nixos-declarative-bridge-1.0"),
+            "version": dbus.String("1.3.0-nixos"),
         }
 
 
 def main() -> int:
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
-    NixOSFirewallDShim(bus)
-    print("[firewall-bridge] Bridge D-Bus org.fedoraproject.FirewallD1 -> NixOS actif.", flush=True)
-    loop = GLib.MainLoop()
-    loop.run()
+    bus_name = dbus.service.BusName(BUS_NAME, bus=bus)
+    root = NixOSFirewallDShim(bus_name)
+    ConfigRootObject(bus_name)
+    root.zone_cfg = ConfigZoneObject(bus_name, root)
+    for idx, svc in enumerate(SERVICE_LIST):
+        ConfigServiceObject(bus_name, idx, svc)
+    print("[firewall-bridge] Bridge D-Bus complet org.fedoraproject.FirewallD1 -> NixOS actif.", flush=True)
+    GLib.MainLoop().run()
     return 0
 
 

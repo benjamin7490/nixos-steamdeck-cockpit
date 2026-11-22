@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Générations NixOS — Cockpit</title>
+  <link rel="stylesheet" href="cockpit-patternfly.css">
+  <link rel="stylesheet" href="style.css">
+  <script src="../base1/cockpit.js"></script>
+</head>
+<body data-page="generations">
+  <div class="pf-v6-c-page no-masthead-sidebar">
+    <main class="pf-v6-c-page__main" tabindex="-1">
+      <section class="pf-v6-c-page__main-section pf-m-light">
+        <div class="nixos-page-header">
+          <div>
+            <h1 class="pf-v6-c-title pf-m-2xl">Générations NixOS &amp; Santé système</h1>
+            <p class="nixos-muted">Générations système, rollbacks atomiques, garbage collection et Health-Checker (style MicroOS).</p>
+          </div>
+          <div class="nixos-actions">
+            <span id="admin-badge" class="pf-v6-c-label pf-m-orange"><span class="pf-v6-c-label__content">Vérification droits...</span></span>
+            <button id="btn-refresh-all" class="pf-v6-c-button pf-m-secondary" type="button">Actualiser</button>
+            <button id="btn-rollback" class="pf-v6-c-button pf-m-warning" type="button">Rollback précédent</button>
+            <button id="btn-gc" class="pf-v6-c-button pf-m-danger" type="button">nix-collect-garbage -d</button>
+            <button id="btn-optimise" class="pf-v6-c-button pf-m-secondary" type="button">Optimiser le Store</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="pf-v6-c-page__main-section">
+        <div class="nixos-stack">
+          <div id="alert-banner" class="pf-v6-c-alert pf-m-inline nixos-hidden" role="alert">
+            <h4 id="alert-title" class="pf-v6-c-alert__title"></h4>
+          </div>
+
+          <div class="nixos-metric-grid">
+            <div class="pf-v6-c-card">
+              <div class="pf-v6-c-card__body">
+                <div class="nixos-muted">Génération active</div>
+                <div id="metric-gen" class="nixos-metric-val">--</div>
+                <div id="metric-gen-date" class="nixos-muted">--</div>
+              </div>
+            </div>
+            <div class="pf-v6-c-card">
+              <div class="pf-v6-c-card__body">
+                <div class="nixos-muted">Health-Checker &amp; Auto-MAJ</div>
+                <div id="metric-health" class="nixos-metric-val">--</div>
+                <div id="metric-health-sub" class="nixos-muted">--</div>
+              </div>
+            </div>
+            <div class="pf-v6-c-card">
+              <div class="pf-v6-c-card__body">
+                <div class="nixos-muted">Thermique / Ventilateur</div>
+                <div id="metric-fan" class="nixos-metric-val">--</div>
+                <div id="metric-temp" class="nixos-muted">Capteurs hwmon</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="pf-v6-c-card">
+            <div class="pf-v6-c-card__header">
+              <div class="pf-v6-c-card__title">
+                <h2 class="pf-v6-c-title pf-m-lg">Générations système (<code>/nix/var/nix/profiles/system</code>)</h2>
+              </div>
+            </div>
+            <div class="pf-v6-c-card__body">
+              <table class="pf-v6-c-table pf-m-grid-md pf-m-compact" role="grid">
+                <thead class="pf-v6-c-table__thead">
+                  <tr class="pf-v6-c-table__tr">
+                    <th class="pf-v6-c-table__th" scope="col">#</th>
+                    <th class="pf-v6-c-table__th" scope="col">Date de création</th>
+                    <th class="pf-v6-c-table__th" scope="col">Version NixOS / Noyau</th>
+                    <th class="pf-v6-c-table__th" scope="col">État</th>
+                    <th class="pf-v6-c-table__th" scope="col">Action</th>
+                  </tr>
+                </thead>
+                <tbody id="generations-tbody" class="pf-v6-c-table__tbody">
+                  <tr class="pf-v6-c-table__tr"><td colspan="5" class="pf-v6-c-table__td nixos-muted">Chargement des générations...</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="pf-v6-c-card">
+            <div class="pf-v6-c-card__header">
+              <div class="pf-v6-c-card__title">
+                <h2 class="pf-v6-c-title pf-m-lg">Health-Checker Boot &amp; Mises à jour automatiques</h2>
+                <p id="health-upgrade-info" class="nixos-muted">Vérification automatique au démarrage avec rollback automatique après échecs répétés.</p>
+              </div>
+              <div class="pf-v6-c-card__actions">
+                <div class="nixos-actions">
+                  <button id="btn-health-check" class="pf-v6-c-button pf-m-secondary pf-m-small" type="button">Tester les sondes</button>
+                  <button id="btn-trigger-upgrade" class="pf-v6-c-button pf-m-primary pf-m-small" type="button">Lancer MAJ auto</button>
+                </div>
+              </div>
+            </div>
+            <div class="pf-v6-c-card__body nixos-stack">
+              <div id="health-probes-grid" class="nixos-probe-grid">
+                <div class="nixos-muted">Chargement des sondes...</div>
+              </div>
+              <div>
+                <h3 class="pf-v6-c-title pf-m-md">Historique des rollbacks automatiques</h3>
+                <ul id="health-rollbacks-list" class="pf-v6-c-list">
+                  <li class="nixos-muted">Aucun rollback automatique déclenché.</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          <div class="pf-v6-c-card">
+            <div class="pf-v6-c-card__header">
+              <div class="pf-v6-c-card__title">
+                <h2 class="pf-v6-c-title pf-m-lg">Capteurs matériels &amp; Ventilateur (<code>hwmon</code> / Steam Deck)</h2>
+              </div>
+            </div>
+            <div class="pf-v6-c-card__body">
+              <div id="hwmon-details" class="nixos-probe-grid">
+                <div class="nixos-muted">Analyse des capteurs hwmon...</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="pf-v6-c-card">
+            <div class="pf-v6-c-card__header">
+              <div class="pf-v6-c-card__title">
+                <h2 class="pf-v6-c-title pf-m-md">Journal d'exécution temps réel</h2>
+              </div>
+              <div class="pf-v6-c-card__actions">
+                <div class="nixos-actions">
+                  <span id="job-status" class="pf-v6-c-label"><span class="pf-v6-c-label__content">Prêt</span></span>
+                  <button id="btn-clear-log" class="pf-v6-c-button pf-m-secondary pf-m-small" type="button">Effacer</button>
+                </div>
+              </div>
+            </div>
+            <div class="pf-v6-c-card__body">
+              <pre id="console-output" class="nixos-console">En attente d'action...</pre>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

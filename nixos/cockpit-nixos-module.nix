@@ -57,17 +57,54 @@ let
         <deny send_destination="org.fedoraproject.FirewallD1"
               send_interface="org.fedoraproject.FirewallD1.zone"
               send_member="removeService"/>
+        <deny send_destination="org.fedoraproject.FirewallD1"
+              send_interface="org.fedoraproject.FirewallD1.config.zone"
+              send_member="addPort"/>
+        <deny send_destination="org.fedoraproject.FirewallD1"
+              send_interface="org.fedoraproject.FirewallD1.config.zone"
+              send_member="removePort"/>
+        <deny send_destination="org.fedoraproject.FirewallD1"
+              send_interface="org.fedoraproject.FirewallD1.config.zone"
+              send_member="addService"/>
+        <deny send_destination="org.fedoraproject.FirewallD1"
+              send_interface="org.fedoraproject.FirewallD1.config.zone"
+              send_member="removeService"/>
       </policy>
     </busconfig>
   '';
 
-  # 6. Dérivation du plugin Frontend Cockpit (exposé dans /etc/cockpit/share/cockpit & /run/current-system/sw/share/cockpit)
-  cockpitNixosPlugin = pkgs.runCommand "cockpit-nixos-plugin" { } ''
+  # 6. Dérivation du plugin Frontend Cockpit (PatternFly 6 extrait directement de pkgs.cockpit)
+  cockpitNixosPlugin = pkgs.runCommand "cockpit-nixos-plugin" {
+    nativeBuildInputs = [ pkgs.gzip ];
+  } ''
     mkdir -p $out/share/cockpit/nixos-manager
-    cp ${../plugin/manifest.json} $out/share/cockpit/nixos-manager/manifest.json
-    cp ${../plugin/index.html}    $out/share/cockpit/nixos-manager/index.html
-    cp ${../plugin/style.css}     $out/share/cockpit/nixos-manager/style.css
-    cp ${../plugin/app.js}        $out/share/cockpit/nixos-manager/app.js
+    cp ${../plugin/manifest.json}    $out/share/cockpit/nixos-manager/manifest.json
+    cp ${../plugin/generations.html} $out/share/cockpit/nixos-manager/generations.html
+    cp ${../plugin/packages.html}    $out/share/cockpit/nixos-manager/packages.html
+    cp ${../plugin/config.html}      $out/share/cockpit/nixos-manager/config.html
+    cp ${../plugin/style.css}        $out/share/cockpit/nixos-manager/style.css
+    cp ${../plugin/app.js}           $out/share/cockpit/nixos-manager/app.js
+
+    # Extrait la feuille PatternFly 6 compilée exacte de la version de Cockpit installée
+    # (network.css inclut Page, Card, Table, Form, Select, Checkbox, Button, Label, Alert, List)
+    touch $out/share/cockpit/nixos-manager/cockpit-patternfly.css
+    for candidate in \
+      "${pkgs.cockpit}/share/cockpit/network/network.css" \
+      "${pkgs.cockpit}/share/cockpit/network/network.css.gz" \
+      "${pkgs.cockpit}/share/cockpit/system/services.css" \
+      "${pkgs.cockpit}/share/cockpit/system/services.css.gz" \
+      "${pkgs.cockpit}/share/cockpit/systemd/services.css" \
+      "${pkgs.cockpit}/share/cockpit/systemd/services.css.gz" \
+      "${pkgs.cockpit}/share/cockpit/shell/index.css" \
+      "${pkgs.cockpit}/share/cockpit/shell/index.css.gz"; do
+      if [ -f "$candidate" ]; then
+        case "$candidate" in
+          *.gz) gzip -dc "$candidate" > $out/share/cockpit/nixos-manager/cockpit-patternfly.css ;;
+          *)    cp "$candidate" $out/share/cockpit/nixos-manager/cockpit-patternfly.css ;;
+        esac
+        break
+      fi
+    done
   '';
 
   # Liste des plugins Cockpit à enregistrer
@@ -306,6 +343,7 @@ in
       description = "Bridge déclaratif D-Bus FirewallD1 -> NixOS networking.firewall";
       after = [ "dbus.service" "network.target" ];
       wantedBy = [ "multi-user.target" ];
+      aliases = [ "firewalld.service" ];
       path = with pkgs; [ nix nixos-rebuild coreutils systemd ];
       environment = {
         GI_TYPELIB_PATH = lib.makeSearchPath "lib/girepository-1.0" [

@@ -4,59 +4,117 @@
   var CTL_BIN = "/run/current-system/sw/bin/cockpit-nixos-ctl";
   var isAdmin = false;
   var busy = false;
-  var currentState = null;
-
   var permission = cockpit.permission({ admin: true });
 
   function $(id) {
     return document.getElementById(id);
   }
 
+  function on(id, evt, handler) {
+    var el = $(id);
+    if (el) {
+      el.addEventListener(evt, handler);
+    }
+  }
+
+  /* Synchronisation exacte avec le thème Light/Dark/Auto de Cockpit (PatternFly 6) */
+  function applyCockpitTheme() {
+    var pref = "auto";
+    try {
+      pref = window.localStorage.getItem("shell:style") || "auto";
+    } catch (e) {
+      pref = "auto";
+    }
+    var prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+    var isDark = (pref === "dark") || (pref === "auto" && prefersDark);
+    document.documentElement.classList.toggle("pf-v6-theme-dark", isDark);
+    document.documentElement.classList.toggle("pf-v5-theme-dark", isDark);
+  }
+
+  window.addEventListener("storage", function (e) {
+    if (!e || e.key === "shell:style") {
+      applyCockpitTheme();
+    }
+  });
+  if (window.matchMedia) {
+    var mq = window.matchMedia("(prefers-color-scheme: dark)");
+    if (mq.addEventListener) {
+      mq.addEventListener("change", applyCockpitTheme);
+    }
+  }
+  applyCockpitTheme();
+
+  function setLabel(id, text, colorModifier) {
+    var el = $(id);
+    if (!el) return;
+    el.className = "pf-v6-c-label" + (colorModifier ? (" " + colorModifier) : "");
+    var content = el.querySelector(".pf-v6-c-label__content");
+    if (content) {
+      content.textContent = text;
+    } else {
+      el.textContent = text;
+    }
+  }
+
+  function makeLabel(text, colorModifier) {
+    var span = document.createElement("span");
+    span.className = "pf-v6-c-label" + (colorModifier ? (" " + colorModifier) : "");
+    var inner = document.createElement("span");
+    inner.className = "pf-v6-c-label__content";
+    inner.textContent = text;
+    span.appendChild(inner);
+    return span;
+  }
+
   function showAlert(msg, type) {
-    var el = $("alert-banner");
-    el.textContent = msg;
-    el.className = "alert " + (type === "error" ? "alert-error" : "alert-success");
+    var box = $("alert-banner");
+    var title = $("alert-title");
+    if (!box || !title) return;
+    title.textContent = msg;
+    box.className = "pf-v6-c-alert pf-m-inline " + (type === "error" ? "pf-m-danger" : "pf-m-success");
   }
 
   function hideAlert() {
-    $("alert-banner").className = "alert hidden";
+    var box = $("alert-banner");
+    if (box) {
+      box.className = "pf-v6-c-alert pf-m-inline nixos-hidden";
+    }
   }
 
-  function setJobStatus(label, kind) {
-    var el = $("job-status");
-    el.textContent = label;
-    el.className = "badge badge-" + kind;
+  function setJobStatus(label, modifier) {
+    setLabel("job-status", label, modifier);
   }
 
   function appendLog(chunk) {
     var out = $("console-output");
+    if (!out) return;
     out.textContent += chunk;
     out.scrollTop = out.scrollHeight;
   }
 
   function resetLog(title) {
     var out = $("console-output");
+    if (!out) return;
     out.textContent = ">>> " + title + " [" + new Date().toLocaleTimeString() + "]\n";
   }
 
   function setBusy(state) {
     busy = state;
-    var buttons = document.querySelectorAll("button[type='submit'], .admin-only, #btn-rebuild-now, #btn-dry-build, #btn-rollback, #btn-gc, #btn-optimise, #btn-sync-nm, #btn-health-check, #btn-trigger-upgrade");
+    var buttons = document.querySelectorAll(
+      "button[type='submit'], .admin-only, #btn-rebuild-now, #btn-dry-build, #btn-rollback, #btn-gc, #btn-optimise, #btn-sync-nm, #btn-health-check, #btn-trigger-upgrade"
+    );
     for (var i = 0; i < buttons.length; i++) {
       buttons[i].disabled = state || !isAdmin;
     }
   }
 
   function updateAdminBadge() {
-    var badge = $("admin-badge");
     if (permission.allowed) {
       isAdmin = true;
-      badge.textContent = "Accès administrateur actif";
-      badge.className = "badge badge-ok";
+      setLabel("admin-badge", "Accès administrateur actif", "pf-m-green");
     } else {
       isAdmin = false;
-      badge.textContent = "Lecture seule (activer l'accès admin en haut)";
-      badge.className = "badge badge-warn";
+      setLabel("admin-badge", "Lecture seule (activer l'accès admin en haut)", "pf-m-orange");
     }
     setBusy(busy);
   }
@@ -77,7 +135,7 @@
     }
     hideAlert();
     setBusy(true);
-    setJobStatus("En cours...", "running");
+    setJobStatus("En cours...", "pf-m-blue");
     resetLog(title);
 
     var proc = cockpit.spawn([CTL_BIN].concat(args), {
@@ -90,13 +148,13 @@
     });
 
     return proc.then(function () {
-      setJobStatus("Succès", "ok");
+      setJobStatus("Succès", "pf-m-green");
       showAlert(title + " : opération terminée avec succès.", "success");
       setBusy(false);
       return refreshAll().then(function () { return true; });
     }).catch(function (err) {
       appendLog("\n[ERREUR] " + (err.message || String(err)) + "\n");
-      setJobStatus("Échec", "err");
+      setJobStatus("Échec", "pf-m-red");
       showAlert(title + " : échec (" + (err.message || "voir le journal") + "). Rollback automatique appliqué si nécessaire.", "error");
       setBusy(false);
       return false;
@@ -105,9 +163,10 @@
 
   function renderGenerations(gens) {
     var tbody = $("generations-tbody");
+    if (!tbody) return;
     tbody.innerHTML = "";
     if (!gens || gens.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="5" class="muted">Aucune génération trouvée.</td></tr>';
+      tbody.innerHTML = '<tr class="pf-v6-c-table__tr"><td colspan="5" class="pf-v6-c-table__td nixos-muted">Aucune génération trouvée.</td></tr>';
       return;
     }
 
@@ -118,31 +177,36 @@
         activeGen = g;
       }
       var tr = document.createElement("tr");
+      tr.className = "pf-v6-c-table__tr";
 
       var tdId = document.createElement("td");
-      tdId.innerHTML = "<strong>#" + String(g.id) + "</strong>";
+      tdId.className = "pf-v6-c-table__td";
+      var strong = document.createElement("strong");
+      strong.textContent = "#" + String(g.id);
+      tdId.appendChild(strong);
       tr.appendChild(tdId);
 
       var tdDate = document.createElement("td");
+      tdDate.className = "pf-v6-c-table__td";
       tdDate.textContent = g.date || "--";
       tr.appendChild(tdDate);
 
       var tdVer = document.createElement("td");
+      tdVer.className = "pf-v6-c-table__td";
       tdVer.textContent = (g.nixos_version || "NixOS") + (g.kernel ? " (" + g.kernel + ")" : "");
       tr.appendChild(tdVer);
 
       var tdState = document.createElement("td");
-      var badge = document.createElement("span");
-      badge.className = g.current ? "badge badge-ok" : "badge badge-idle";
-      badge.textContent = g.current ? "Active" : "Disponible";
-      tdState.appendChild(badge);
+      tdState.className = "pf-v6-c-table__td";
+      tdState.appendChild(makeLabel(g.current ? "Active" : "Disponible", g.current ? "pf-m-green" : ""));
       tr.appendChild(tdState);
 
       var tdAct = document.createElement("td");
+      tdAct.className = "pf-v6-c-table__td";
       if (!g.current) {
         var btn = document.createElement("button");
         btn.type = "button";
-        btn.className = "btn btn-small btn-secondary admin-only";
+        btn.className = "pf-v6-c-button pf-m-secondary pf-m-small admin-only";
         btn.textContent = "Activer #" + String(g.id);
         btn.disabled = !isAdmin || busy;
         (function (genId) {
@@ -154,46 +218,58 @@
         })(g.id);
         tdAct.appendChild(btn);
       } else {
-        tdAct.innerHTML = '<span class="muted">Courante</span>';
+        var span = document.createElement("span");
+        span.className = "nixos-muted";
+        span.textContent = "Courante";
+        tdAct.appendChild(span);
       }
       tr.appendChild(tdAct);
       tbody.appendChild(tr);
     }
 
-    if (activeGen) {
+    if (activeGen && $("metric-gen")) {
       $("metric-gen").textContent = "#" + String(activeGen.id);
-      $("metric-gen-date").textContent = activeGen.date || "";
+      if ($("metric-gen-date")) {
+        $("metric-gen-date").textContent = activeGen.date || "";
+      }
     }
   }
 
   function renderPackages(pkgs) {
     var tbody = $("packages-tbody");
+    if ($("metric-pkgs")) {
+      $("metric-pkgs").textContent = String((pkgs || []).length);
+    }
+    if (!tbody) return;
     tbody.innerHTML = "";
-    $("metric-pkgs").textContent = String((pkgs || []).length);
 
     if (!pkgs || pkgs.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="3" class="muted">Aucun paquet supplémentaire déclaré via Cockpit.</td></tr>';
+      tbody.innerHTML = '<tr class="pf-v6-c-table__tr"><td colspan="3" class="pf-v6-c-table__td nixos-muted">Aucun paquet supplémentaire déclaré via Cockpit.</td></tr>';
       return;
     }
 
     for (var i = 0; i < pkgs.length; i++) {
       var name = pkgs[i];
       var tr = document.createElement("tr");
+      tr.className = "pf-v6-c-table__tr";
 
       var tdName = document.createElement("td");
+      tdName.className = "pf-v6-c-table__td";
       var code = document.createElement("code");
       code.textContent = name;
       tdName.appendChild(code);
       tr.appendChild(tdName);
 
       var tdSrc = document.createElement("td");
-      tdSrc.textContent = "cockpit-managed.nix";
+      tdSrc.className = "pf-v6-c-table__td";
+      tdSrc.textContent = "/etc/nixos/cockpit-managed.nix";
       tr.appendChild(tdSrc);
 
       var tdAct = document.createElement("td");
+      tdAct.className = "pf-v6-c-table__td";
       var btn = document.createElement("button");
       btn.type = "button";
-      btn.className = "btn btn-small btn-danger admin-only";
+      btn.className = "pf-v6-c-button pf-m-danger pf-m-small admin-only";
       btn.textContent = "Supprimer";
       btn.disabled = !isAdmin || busy;
       (function (pkgName) {
@@ -213,26 +289,24 @@
     var fw = (state && state.firewall) || {};
     var net = (state && state.network) || {};
 
-    $("fw-enable").checked = fw.enable !== false;
-    $("fw-tcp").value = (fw.allowedTCPPorts || []).join(", ");
-    $("fw-udp").value = (fw.allowedUDPPorts || []).join(", ");
-    $("fw-trusted").value = (fw.trustedInterfaces || []).join(", ");
-
-    $("net-hostname").value = net.hostname || "";
-    $("net-dns").value = (net.nameservers || []).join(", ");
-
-    var tcpCount = (fw.allowedTCPPorts || []).length;
-    var udpCount = (fw.allowedUDPPorts || []).length;
-    $("metric-fw").textContent = (fw.enable === false ? "Désactivé" : "Actif") + " (" + tcpCount + " TCP / " + udpCount + " UDP)";
+    if ($("fw-enable")) $("fw-enable").checked = fw.enable !== false;
+    if ($("fw-tcp")) $("fw-tcp").value = (fw.allowedTCPPorts || []).join(", ");
+    if ($("fw-udp")) $("fw-udp").value = (fw.allowedUDPPorts || []).join(", ");
+    if ($("fw-trusted")) $("fw-trusted").value = (fw.trustedInterfaces || []).join(", ");
+    if ($("net-hostname")) $("net-hostname").value = net.hostname || "";
+    if ($("net-dns")) $("net-dns").value = (net.nameservers || []).join(", ");
 
     var profiles = net.nmProfiles || {};
     var keys = Object.keys(profiles);
-    $("metric-net-sub").textContent = keys.length + " profil(s) NM déclaratif(s)";
+    if ($("metric-net-sub")) {
+      $("metric-net-sub").textContent = String(keys.length);
+    }
 
     var ul = $("nm-profiles-list");
+    if (!ul) return;
     ul.innerHTML = "";
     if (keys.length === 0) {
-      ul.innerHTML = '<li class="muted">Aucun profil NetworkManager intercepté pour le moment.</li>';
+      ul.innerHTML = '<li class="nixos-muted">Aucun profil NetworkManager intercepté pour le moment.</li>';
       return;
     }
 
@@ -253,38 +327,46 @@
 
   function renderMounts(mounts) {
     var tbody = $("mounts-tbody");
+    if (!tbody) return;
     tbody.innerHTML = "";
     var entries = mounts || [];
     if (entries.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="5" class="muted">Aucun montage déclaratif configuré via Cockpit.</td></tr>';
+      tbody.innerHTML = '<tr class="pf-v6-c-table__tr"><td colspan="5" class="pf-v6-c-table__td nixos-muted">Aucun montage déclaratif configuré via Cockpit.</td></tr>';
       return;
     }
 
     for (var i = 0; i < entries.length; i++) {
       var m = entries[i];
       var tr = document.createElement("tr");
+      tr.className = "pf-v6-c-table__tr";
 
       var tdMp = document.createElement("td");
-      tdMp.innerHTML = "<code></code>";
-      tdMp.firstChild.textContent = m.mountPoint;
+      tdMp.className = "pf-v6-c-table__td";
+      var code = document.createElement("code");
+      code.textContent = m.mountPoint;
+      tdMp.appendChild(code);
       tr.appendChild(tdMp);
 
       var tdDev = document.createElement("td");
+      tdDev.className = "pf-v6-c-table__td";
       tdDev.textContent = m.device;
       tr.appendChild(tdDev);
 
       var tdFs = document.createElement("td");
+      tdFs.className = "pf-v6-c-table__td";
       tdFs.textContent = m.fsType;
       tr.appendChild(tdFs);
 
       var tdOpt = document.createElement("td");
+      tdOpt.className = "pf-v6-c-table__td";
       tdOpt.textContent = (m.options || []).join(",");
       tr.appendChild(tdOpt);
 
       var tdAct = document.createElement("td");
+      tdAct.className = "pf-v6-c-table__td";
       var btn = document.createElement("button");
       btn.type = "button";
-      btn.className = "btn btn-small btn-danger admin-only";
+      btn.className = "pf-v6-c-button pf-m-danger pf-m-small admin-only";
       btn.textContent = "Retirer";
       btn.disabled = !isAdmin || busy;
       (function (mp) {
@@ -304,35 +386,36 @@
     var fanEl = $("metric-fan");
     var tempEl = $("metric-temp");
     var grid = $("hwmon-details");
-    grid.innerHTML = "";
+    if (!fanEl && !grid) return;
 
     if (!hw) {
-      fanEl.textContent = "N/A";
-      tempEl.textContent = "Aucun capteur";
+      if (fanEl) fanEl.textContent = "N/A";
+      if (tempEl) tempEl.textContent = "Aucun capteur";
       return;
     }
 
-    if (hw.fan_rpm !== null && hw.fan_rpm !== undefined) {
-      fanEl.textContent = String(hw.fan_rpm) + " RPM";
-    } else {
-      fanEl.textContent = "Auto / EC";
+    if (fanEl) {
+      fanEl.textContent = (hw.fan_rpm !== null && hw.fan_rpm !== undefined) ? (String(hw.fan_rpm) + " RPM") : "Auto / EC";
+    }
+    if (tempEl) {
+      if (hw.apu_temp_c !== null && hw.apu_temp_c !== undefined) {
+        tempEl.textContent = "APU/CPU : " + hw.apu_temp_c.toFixed(1) + " °C" + (hw.steamdeck_detected ? " (Steam Deck)" : "");
+      } else {
+        tempEl.textContent = hw.steamdeck_detected ? "Driver steamdeck_hwmon détecté" : "Capteurs standards";
+      }
     }
 
-    if (hw.apu_temp_c !== null && hw.apu_temp_c !== undefined) {
-      tempEl.textContent = "APU/CPU : " + hw.apu_temp_c.toFixed(1) + " °C" + (hw.steamdeck_detected ? " (Steam Deck)" : "");
-    } else {
-      tempEl.textContent = hw.steamdeck_detected ? "Driver steamdeck_hwmon détecté" : "Capteurs standards";
-    }
-
+    if (!grid) return;
+    grid.innerHTML = "";
     var sensors = hw.sensors || [];
     if (sensors.length === 0) {
-      grid.innerHTML = '<div class="muted">Aucun périphérique hwmon lisible.</div>';
+      grid.innerHTML = '<div class="nixos-muted">Aucun périphérique hwmon lisible.</div>';
       return;
     }
     for (var i = 0; i < sensors.length; i++) {
       var s = sensors[i];
       var div = document.createElement("div");
-      div.className = "hwmon-item";
+      div.className = "nixos-probe-item";
       var strong = document.createElement("strong");
       strong.textContent = s.chip + " — " + s.label;
       var val = document.createElement("div");
@@ -349,136 +432,130 @@
     var infoEl = $("health-upgrade-info");
     var grid = $("health-probes-grid");
     var rbList = $("health-rollbacks-list");
+    if (!valEl && !grid) return;
 
     if (!hc) {
-      valEl.textContent = "Inactif";
-      subEl.textContent = "Health-checker non configuré";
+      if (valEl) valEl.textContent = "Inactif";
+      if (subEl) subEl.textContent = "Health-checker non configuré";
       return;
     }
 
     var st = hc.status || "UNKNOWN";
-    valEl.textContent = st === "HEALTHY" ? "Sain (Bénie)" : st;
+    if (valEl) valEl.textContent = st === "HEALTHY" ? "Sain (Bénie)" : st;
     var lg = (hc.last_good_gen !== null && hc.last_good_gen !== undefined) ? ("#" + String(hc.last_good_gen)) : "--";
-    subEl.textContent = "Last Good: " + lg + " • Essais: " + String(hc.unhealthy_boot_attempts || 0) + "/" + String(hc.max_boot_attempts || 3);
+    if (subEl) {
+      subEl.textContent = "Last Good : " + lg + " • Essais : " + String(hc.unhealthy_boot_attempts || 0) + "/" + String(hc.max_boot_attempts || 3);
+    }
+    if (infoEl) {
+      var upgTxt = hc.auto_upgrade_active ? ("Auto-MAJ active (prochaine : " + (hc.auto_upgrade_next || "planifiée") + ")") : "Auto-MAJ inactive";
+      infoEl.textContent = upgTxt + (hc.last_check_time ? (" — Dernier check : " + hc.last_check_time) : "");
+    }
 
-    var upgTxt = hc.auto_upgrade_active ? ("Auto-MAJ active (prochaine : " + (hc.auto_upgrade_next || "planifiée") + ")") : "Auto-MAJ inactive";
-    infoEl.textContent = upgTxt + (hc.last_check_time ? (" — Dernier check : " + hc.last_check_time) : "");
-
-    grid.innerHTML = "";
-    var probes = hc.probes || [];
-    if (probes.length === 0) {
-      grid.innerHTML = '<div class="muted">En attente du premier health-check (cliquez sur Tester les sondes).</div>';
-    } else {
-      for (var i = 0; i < probes.length; i++) {
-        var p = probes[i];
-        var item = document.createElement("div");
-        item.className = "hwmon-item";
-        var title = document.createElement("strong");
-        title.textContent = (p.ok ? "[OK] " : "[ÉCHEC] ") + p.name;
-        var detail = document.createElement("div");
-        detail.textContent = p.detail || "";
-        item.appendChild(title);
-        item.appendChild(detail);
-        grid.appendChild(item);
+    if (grid) {
+      grid.innerHTML = "";
+      var probes = hc.probes || [];
+      if (probes.length === 0) {
+        grid.innerHTML = '<div class="nixos-muted">En attente du premier health-check (cliquez sur Tester les sondes).</div>';
+      } else {
+        for (var i = 0; i < probes.length; i++) {
+          var p = probes[i];
+          var item = document.createElement("div");
+          item.className = "nixos-probe-item";
+          item.appendChild(makeLabel(p.name, p.ok ? "pf-m-green" : "pf-m-red"));
+          var detail = document.createElement("div");
+          detail.className = "nixos-muted";
+          detail.textContent = p.detail || "";
+          item.appendChild(detail);
+          grid.appendChild(item);
+        }
       }
     }
 
-    rbList.innerHTML = "";
-    var hist = hc.rollback_history || [];
-    if (hist.length === 0) {
-      rbList.innerHTML = '<li class="muted">Aucun rollback automatique déclenché.</li>';
-    } else {
-      for (var j = hist.length - 1; j >= 0; j--) {
-        var ev = hist[j];
-        var li = document.createElement("li");
-        li.textContent = ev.time + " : #" + String(ev.from_gen) + " -> #" + String(ev.to_gen) + " (" + (ev.reason || "") + ")";
-        rbList.appendChild(li);
+    if (rbList) {
+      rbList.innerHTML = "";
+      var hist = hc.rollback_history || [];
+      if (hist.length === 0) {
+        rbList.innerHTML = '<li class="nixos-muted">Aucun rollback automatique déclenché.</li>';
+      } else {
+        for (var j = hist.length - 1; j >= 0; j--) {
+          var ev = hist[j];
+          var li = document.createElement("li");
+          li.textContent = ev.time + " : #" + String(ev.from_gen) + " -> #" + String(ev.to_gen) + " (" + (ev.reason || "") + ")";
+          rbList.appendChild(li);
+        }
       }
     }
   }
 
   function refreshAll() {
-    var pState = spawnCtlRead(["status"]).then(function (raw) {
+    return spawnCtlRead(["status"]).then(function (raw) {
       var data = JSON.parse(raw);
-      currentState = data.state;
       renderGenerations(data.generations);
       renderPackages(data.state.packages);
       renderNetworkAndFirewall(data.state);
       renderMounts(data.state.mounts);
       renderTelemetry(data.telemetry);
       renderHealth(data.health);
-      $("nix-preview").textContent = data.managed_nix || "# Fichier non généré";
+      if ($("nix-preview")) {
+        $("nix-preview").textContent = data.managed_nix || "# Fichier non généré";
+      }
     }).catch(function (err) {
       showAlert("Impossible de lire l'état NixOS : " + (err.message || err), "error");
     });
-    return pState;
-  }
-
-  function setupTabs() {
-    var tabs = document.querySelectorAll(".tab");
-    for (var i = 0; i < tabs.length; i++) {
-      tabs[i].addEventListener("click", function () {
-        var target = this.getAttribute("data-tab");
-        var allTabs = document.querySelectorAll(".tab");
-        var allPanels = document.querySelectorAll(".panel");
-        for (var j = 0; j < allTabs.length; j++) {
-          allTabs[j].classList.remove("active");
-        }
-        for (var k = 0; k < allPanels.length; k++) {
-          allPanels[k].classList.remove("active");
-        }
-        this.classList.add("active");
-        $("panel-" + target).classList.add("active");
-      });
-    }
   }
 
   function setupEvents() {
-    $("btn-refresh-all").addEventListener("click", refreshAll);
-    $("btn-reload-nix").addEventListener("click", refreshAll);
-    $("btn-clear-log").addEventListener("click", function () {
-      $("console-output").textContent = "";
+    on("btn-refresh-all", "click", refreshAll);
+    on("btn-reload-nix", "click", refreshAll);
+    on("btn-clear-log", "click", function () {
+      if ($("console-output")) $("console-output").textContent = "";
     });
 
-    $("btn-rebuild-now").addEventListener("click", function () {
+    /* Navigation directe vers les modules natifs Cockpit */
+    on("btn-open-network", "click", function () { cockpit.jump("/network"); });
+    on("btn-open-firewall", "click", function () { cockpit.jump("/network/firewall"); });
+    on("btn-open-files", "click", function () { cockpit.jump("/files"); });
+    on("btn-open-storage", "click", function () { cockpit.jump("/storage"); });
+
+    on("btn-rebuild-now", "click", function () {
       spawnCtlWrite(["rebuild"], "nixos-rebuild switch");
     });
 
-    $("btn-dry-build").addEventListener("click", function () {
+    on("btn-dry-build", "click", function () {
       spawnCtlWrite(["dry-build"], "nixos-rebuild dry-build");
     });
 
-    $("btn-rollback").addEventListener("click", function () {
+    on("btn-rollback", "click", function () {
       if (window.confirm("Revenir immédiatement à la génération NixOS précédente (nixos-rebuild switch --rollback) ?")) {
         spawnCtlWrite(["rollback"], "Rollback NixOS");
       }
     });
 
-    $("btn-gc").addEventListener("click", function () {
+    on("btn-gc", "click", function () {
       if (window.confirm("Supprimer TOUTES les anciennes générations NixOS et exécuter nix-collect-garbage -d ? Cette action est irréversible.")) {
         spawnCtlWrite(["gc"], "Garbage Collection (nix-collect-garbage -d)");
       }
     });
 
-    $("btn-optimise").addEventListener("click", function () {
+    on("btn-optimise", "click", function () {
       spawnCtlWrite(["optimise-store"], "Optimisation Nix Store (déduplication hardlinks)");
     });
 
-    $("btn-health-check").addEventListener("click", function () {
+    on("btn-health-check", "click", function () {
       spawnCtlWrite(["health-check"], "Exécution manuelle du Health-Checker NixOS");
     });
 
-    $("btn-trigger-upgrade").addEventListener("click", function () {
+    on("btn-trigger-upgrade", "click", function () {
       if (window.confirm("Déclencher immédiatement nixos-upgrade.service (mise à jour automatique du canal & rebuild) ?")) {
         spawnCtlWrite(["trigger-upgrade"], "Mise à jour automatique NixOS (nixos-upgrade)");
       }
     });
 
-    $("btn-sync-nm").addEventListener("click", function () {
+    on("btn-sync-nm", "click", function () {
       spawnCtlWrite(["sync-networkmanager"], "Import déclaratif des profils NetworkManager");
     });
 
-    $("form-add-pkg").addEventListener("submit", function (e) {
+    on("form-add-pkg", "submit", function (e) {
       e.preventDefault();
       var pkg = $("input-pkg-name").value.trim();
       if (!pkg) return;
@@ -489,14 +566,14 @@
       });
     });
 
-    $("btn-search-pkg").addEventListener("click", function () {
+    on("btn-search-pkg", "click", function () {
       var q = $("input-pkg-name").value.trim();
       var box = $("pkg-search-results");
       if (q.length < 2) {
         showAlert("Entrez au moins 2 caractères pour rechercher dans nixpkgs.", "error");
         return;
       }
-      box.classList.remove("hidden");
+      box.classList.remove("nixos-hidden");
       box.textContent = "Recherche de '" + q + "' dans nixpkgs...";
       spawnCtlRead(["pkg-search", q]).then(function (raw) {
         var results = JSON.parse(raw);
@@ -508,14 +585,15 @@
         for (var i = 0; i < results.length; i++) {
           var item = results[i];
           var row = document.createElement("div");
-          row.className = "search-item";
+          row.className = "nixos-search-row";
           var info = document.createElement("span");
-          info.innerHTML = "<code></code> — ";
-          info.firstChild.textContent = item.attr;
-          info.appendChild(document.createTextNode(item.pname + " (" + (item.description || "") + ")"));
+          var code = document.createElement("code");
+          code.textContent = item.attr;
+          info.appendChild(code);
+          info.appendChild(document.createTextNode(" — " + item.pname + (item.description ? (" (" + item.description + ")") : "")));
           var addBtn = document.createElement("button");
           addBtn.type = "button";
-          addBtn.className = "btn btn-small btn-primary admin-only";
+          addBtn.className = "pf-v6-c-button pf-m-primary pf-m-small admin-only";
           addBtn.textContent = "Installer";
           addBtn.disabled = !isAdmin || busy;
           (function (attr) {
@@ -532,7 +610,7 @@
       });
     });
 
-    $("form-firewall").addEventListener("submit", function (e) {
+    on("form-firewall", "submit", function (e) {
       e.preventDefault();
       var payload = JSON.stringify({
         enable: $("fw-enable").checked,
@@ -543,7 +621,7 @@
       spawnCtlWrite(["fw-set", payload], "Mise à jour déclarative du pare-feu");
     });
 
-    $("form-network").addEventListener("submit", function (e) {
+    on("form-network", "submit", function (e) {
       e.preventDefault();
       var payload = JSON.stringify({
         hostname: $("net-hostname").value.trim(),
@@ -552,7 +630,7 @@
       spawnCtlWrite(["net-set", payload], "Mise à jour déclarative du réseau");
     });
 
-    $("form-add-mount").addEventListener("submit", function (e) {
+    on("form-add-mount", "submit", function (e) {
       e.preventDefault();
       var payload = JSON.stringify({
         mountPoint: $("mnt-point").value.trim(),
@@ -570,16 +648,18 @@
   }
 
   document.addEventListener("DOMContentLoaded", function () {
-    setupTabs();
+    applyCockpitTheme();
     setupEvents();
     updateAdminBadge();
     refreshAll();
-    window.setInterval(function () {
-      if (!busy) {
-        spawnCtlRead(["telemetry"]).then(function (raw) {
-          renderTelemetry(JSON.parse(raw));
-        }).catch(function () {});
-      }
-    }, 10000);
+    if (document.body.getAttribute("data-page") === "generations") {
+      window.setInterval(function () {
+        if (!busy) {
+          spawnCtlRead(["telemetry"]).then(function (raw) {
+            renderTelemetry(JSON.parse(raw));
+          }).catch(function () {});
+        }
+      }, 10000);
+    }
   });
 })();
