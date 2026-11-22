@@ -415,6 +415,8 @@ in
         "d /mnt/storage 2775 root wheel -"
       ] ++ lib.optionals cfg.enableMachines [
         "d /var/lib/libvirt/images 2775 root libvirtd -"
+        "d /var/lib/libvirt/boot 2775 root libvirtd -"
+        "d /var/lib/libvirt/isos 2775 root libvirtd -"
       ] ++ lib.optionals cfg.enableHealthChecker [
         "d /var/lib/nixos-health-checker 0755 root root -"
       ];
@@ -530,6 +532,27 @@ in
           package = pkgs.qemu_kvm;
           runAsRoot = true;
           swtpm.enable = true;
+        };
+      };
+
+      # Démarre et active en autostart le réseau NAT 'default' de libvirt pour cockpit-machines
+      systemd.services.libvirtd-init-defaults = lib.mkIf cfg.enableMachines {
+        description = "Active le réseau NAT par défaut de libvirt pour cockpit-machines";
+        after = [ "libvirtd.service" ];
+        wants = [ "libvirtd.service" ];
+        wantedBy = [ "multi-user.target" ];
+        path = [ pkgs.libvirt pkgs.gnugrep ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = pkgs.writeShellScript "libvirtd-init-defaults" ''
+            if virsh net-info default >/dev/null 2>&1; then
+              virsh net-autostart default >/dev/null 2>&1 || true
+              if ! virsh net-list --name | grep -qx default; then
+                virsh net-start default >/dev/null 2>&1 || true
+              fi
+            fi
+          '';
         };
       };
 
