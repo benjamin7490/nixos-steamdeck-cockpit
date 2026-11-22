@@ -61,7 +61,7 @@ let
     </busconfig>
   '';
 
-  # 6. Dérivation du plugin Frontend Cockpit (exposé dans /run/current-system/sw/share/cockpit/nixos-manager)
+  # 6. Dérivation du plugin Frontend Cockpit (exposé dans /etc/cockpit/share/cockpit & /run/current-system/sw/share/cockpit)
   cockpitNixosPlugin = pkgs.runCommand "cockpit-nixos-plugin" { } ''
     mkdir -p $out/share/cockpit/nixos-manager
     cp ${../plugin/manifest.json} $out/share/cockpit/nixos-manager/manifest.json
@@ -69,6 +69,43 @@ let
     cp ${../plugin/style.css}     $out/share/cockpit/nixos-manager/style.css
     cp ${../plugin/app.js}        $out/share/cockpit/nixos-manager/app.js
   '';
+
+  # Liste des plugins Cockpit à enregistrer
+  cockpitPluginPackages =
+    [ cockpitNixosPlugin ]
+    ++ lib.optionals cfg.enableFiles (lib.optional (pkgs ? cockpit-files) pkgs.cockpit-files)
+    ++ lib.optional cfg.enablePodman pkgs.cockpit-podman
+    ++ lib.optional cfg.enableMachines pkgs.cockpit-machines;
+
+  # Origines par défaut (corrige nixpkgs#453337 pour http/https localhost, tunnel SSH et accès LAN/.local)
+  defaultAllowedOrigins =
+    let
+      p = toString cfg.port;
+      host = config.networking.hostName;
+    in
+    [
+      "https://localhost:${p}"
+      "http://localhost:${p}"
+      "https://127.0.0.1:${p}"
+      "http://127.0.0.1:${p}"
+      "https://192.168.*:${p}"
+      "http://192.168.*:${p}"
+      "https://10.*:${p}"
+      "http://10.*:${p}"
+      "https://172.*:${p}"
+      "http://172.*:${p}"
+      "https://100.*:${p}"
+      "http://100.*:${p}"
+      "https://*.local:${p}"
+      "http://*.local:${p}"
+    ]
+    ++ lib.optionals (host != "") [
+      "https://${host}:${p}"
+      "http://${host}:${p}"
+      "https://${host}.local:${p}"
+      "http://${host}.local:${p}"
+    ]
+    ++ cfg.allowedOrigins;
 
 in
 {
@@ -163,8 +200,6 @@ in
       settings = {
         WebService = {
           AllowUnencrypted = false;
-        } // lib.optionalAttrs (cfg.allowedOrigins != [ ]) {
-          Origins = lib.concatStringsSep " " cfg.allowedOrigins;
         };
       };
     };
@@ -414,6 +449,18 @@ in
       ];
     };
   }
+
+  # Enregistrement natif des plugins Cockpit (NixOS 25.11+/unstable)
+  (lib.optionalAttrs (options.services.cockpit ? plugins) {
+    services.cockpit.plugins = cockpitPluginPackages;
+  })
+
+  # Origines autorisées (corrige nixpkgs#453337 : tunnel SSH http://localhost, 127.0.0.1, LAN, .local)
+  (if (options.services.cockpit ? allowed-origins) then {
+    services.cockpit.allowed-origins = defaultAllowedOrigins;
+  } else {
+    services.cockpit.settings.WebService.Origins = lib.mkForce (lib.concatStringsSep " " defaultAllowedOrigins);
+  })
 
   # Watchdog matériel systemd (compatible NixOS 25.05+/unstable et fallback 24.11)
   (if (options.systemd ? settings && options.systemd.settings ? Manager) then {
