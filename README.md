@@ -4,7 +4,7 @@
 ![Cockpit](https://img.shields.io/badge/Cockpit-Native%20Declarative%20Bridge-0066CC)
 ![Podman](https://img.shields.io/badge/Podman-Ready-892CA0?logo=podman&logoColor=white)
 ![KVM / Libvirt](https://img.shields.io/badge/KVM%20%2F%20Libvirt-cockpit--machines-orange)
-![Steam Deck](https://img.shields.io/badge/Steam%20Deck-Jovian--NixOS-1A9FFF?logo=steam&logoColor=white)
+![Steam Deck](https://img.shields.io/badge/Steam%20Deck-EC%20Modules%20%2B%20Fan%20Control-1A9FFF?logo=steam&logoColor=white)
 
 A NixOS module and **Cockpit** integration that make Cockpit's **real built-in modules** (**Software Updates**, **Storage**, **Networking & Firewall**, **Podman**, **Virtual Machines**, and **Files**) work **natively and declaratively** on NixOS by bridging every UI action into `/etc/nixos/cockpit-managed.nix` — paired with an **openSUSE MicroOS–style boot health checker with automatic rollback** and a turnkey headless server profile for the **Steam Deck** (or any NixOS server).
 
@@ -23,16 +23,16 @@ A NixOS module and **Cockpit** integration that make Cockpit's **real built-in m
 - **Automatic Upgrades & Background Boot Health-Checker (openSUSE MicroOS–style)**:
   - Nightly `system.autoUpgrade` with a configurable reboot window (`03:00`–`05:30`) and weekly `nix.gc` retaining the last 14 days of generations.
   - Pure background systemd protection (no extra UI clutter; inspect logs natively in Cockpit *Logs* / *Services* or `journalctl -u nixos-health-checker`): hardware watchdog + `panic=10`, native `systemd-boot` `bootCounting` (when available in `nixpkgs`), early boot-loop counter, and health probes gating `boot-complete.target`. Repeated boot failures on a new generation trigger an **automatic rollback** to the last known-good generation.
-- **Minimal Steam Deck Headless Server Profile (via Jovian-NixOS)**:
-  - Pulls **only** Valve's Neptune kernel (`steamdeck` / `steamdeck_hwmon`), `jupiter-fan-control` (plus an optional 24/7 server fan curve daemon), and Holo Wi-Fi/APU firmware — explicitly skipping desktop bloat (no PipeWire, WirePlumber, `steamdeck-dsp`, custom 32/64-bit Mesa, Xorg, or `fwupd` builds).
-  - Headless tuning: Steam/Gamescope disabled, sleep/suspend disabled, `consoleblank=60` + DPMS powerdown + automatic backlight/panel power-off after 60 s (`steamdeck-screen on|off` helper), plus optional kernel-level display disable (`video=eDP-1:d`) for zero light & zero OLED burn-in.
+- **Minimal Steam Deck Headless Server Profile (Zero Kernel Compilation)**:
+  - Runs on the **standard cached NixOS kernel** (no full kernel build, no PipeWire, no Mesa, no X11, no `fwupd`) and compiles **only** Valve's 3 lightweight out-of-tree EC kernel modules (`steamdeck.ko`, `steamdeck-hwmon.ko`, `leds-steamdeck.ko`, ~4 s build) plus Valve's official `jupiter-fan-control` daemon (or an optional 24/7 custom server fan curve).
+  - Headless 24/7 tuning: sleep/suspend disabled, `loglevel=3`, `consoleblank=60` + DPMS powerdown + automatic backlight, panel & white charge LED power-off after 60 s (`steamdeck-screen on|off`), optional kernel-level display disable (`video=eDP-1:d`), and automatic 80% battery charge limit (`max_battery_charge_level`) to prevent battery swelling on 24/7 AC power.
 
 ---
 
 ## Quick Start
 
 ### Recommended Channel
-Track **`nixos-unstable`** (recommended for `Jovian-NixOS` and `cockpit-files`):
+Track **`nixos-unstable`** (recommended for the latest Cockpit and `cockpit-files`):
 ```bash
 sudo nix-channel --add https://nixos.org/channels/nixos-unstable nixos
 sudo nix-channel --update
@@ -62,13 +62,12 @@ Add the repository import to your existing `/etc/nixos/configuration.nix`:
 }
 ```
 
-Apply and reboot once to boot into Valve's Neptune kernel (`steamdeck_hwmon`):
+Apply (uses the standard cached NixOS kernel and only compiles the 3 tiny Steam Deck EC `.ko` modules in a few seconds):
 ```bash
 sudo nixos-rebuild switch
-sudo reboot
 ```
 
-### Option B — Generic NixOS Server (without Steam Deck / Jovian drivers)
+### Option B — Generic NixOS Server (without Steam Deck modules)
 
 Import only the standalone module `nixos/cockpit-nixos-module.nix`:
 
@@ -138,8 +137,9 @@ All profile defaults use `lib.mkDefault`, so any setting can be overridden direc
 | `services.cockpit-nixos.maxBootAttempts` | `3` | Maximum failed boot attempts before automatic rollback |
 | `services.steamdeck-server.adminUsers` | `[ ]` | Existing users to grant `wheel`, `networkmanager` (and `libvirtd`) |
 | `services.steamdeck-server.enableCustomFanCurve` | `false` | Replace `jupiter-fan-control` with a custom 24/7 server fan curve |
-| `services.steamdeck-server.screenAutoOff` | `true` | Enable DPMS powerdown and cut backlight/panel power 60 s after boot |
+| `services.steamdeck-server.screenAutoOff` | `true` | Enable DPMS powerdown and cut backlight, panel & charge LED 60 s after boot |
 | `services.steamdeck-server.disableInternalDisplay` | `false` | Disable internal `eDP-1` panel at kernel level (`video=eDP-1:d`) |
+| `services.steamdeck-server.batteryChargeLimit` | `80` | Battery charge cap (%) via `steamdeck_hwmon` for 24/7 AC operation (`null` to disable) |
 
 ---
 
@@ -208,7 +208,9 @@ flowchart TB
 ├── default.nix                             # fetchTarball entry point (Steam Deck server profile)
 ├── flake.nix                               # Flake outputs (default, steamdeck-server, cockpit-nixos)
 ├── profiles/
-│   └── steamdeck-server.nix                # Full Steam Deck headless server profile (Jovian + Cockpit + HC)
+│   └── steamdeck-server.nix                # Full Steam Deck headless server profile (EC modules + fan + Cockpit + HC)
+├── drivers/
+│   └── steamdeck-modules/                  # Out-of-tree Valve EC kernel modules (steamdeck, steamdeck-hwmon, leds-steamdeck)
 ├── deploy/
 │   └── steamdeck-server.nix                # Minimal drop-in snippet for /etc/nixos/
 ├── nixos/

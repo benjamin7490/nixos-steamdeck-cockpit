@@ -9,6 +9,14 @@
 #     (builtins.fetchTarball "https://github.com/benjamin7490/nixos-steamdeck-cockpit/archive/main.tar.gz")
 #   ];
 #
+# Utilise le noyau NixOS standard (100 % en cache binaire cache.nixos.org) et
+# compile UNIQUEMENT les 3 petits modules EC Steam Deck hors-arbre (~4s) :
+#   - steamdeck.ko         (MFD EC ACPI VLV0100)
+#   - steamdeck-hwmon.ko   (ventilateur fan1_target/input + limite de charge batterie)
+#   - leds-steamdeck.ko    (contrôle / extinction de la LED blanche de charge)
+# + le démon officiel Valve jupiter-fan-control (aucune compilation de noyau,
+#   aucun PipeWire / Mesa / X11 / fwupd).
+#
 # Tous les réglages utilisent lib.mkDefault : vous pouvez surcharger n'importe
 # quelle option directement dans votre /etc/nixos/configuration.nix.
 # ==============================================================================
@@ -16,11 +24,40 @@
 { config, options, pkgs, lib, ... }:
 
 let
-  cfgFan = config.services.steamdeck-server;
+  cfgDeck = config.services.steamdeck-server;
 
-  # Courbe ventilateur serveur 24/7 utilisant la VRAIE API sysfs de steamdeck_hwmon
-  # (fan1_target en RPM 2000..7300, compatible Steam Deck LCD Jupiter & OLED Galileo,
-  # et retour automatique au contrôle EC via fan1_target = 0 à l'arrêt).
+  # 1. Modules noyau out-of-tree officiels Valve (compilés en ~4s contre le noyau NixOS standard)
+  steamdeckEcModules = config.boot.kernelPackages.callPackage ../drivers/steamdeck-modules { };
+
+  # 2. Démon officiel Valve jupiter-fan-control (Python pur + pyyaml, 0 compilation C)
+  jupiterFanControl = pkgs.stdenvNoCC.mkDerivation rec {
+    pname = "jupiter-fan-control";
+    version = "20260902.1";
+
+    src = pkgs.fetchFromGitHub {
+      owner = "Jovian-Experiments";
+      repo = "jupiter-fan-control";
+      rev = version;
+      hash = "sha256-75DW3cMxakZ11CZUF4bvYV8l+d24JWleEiGRMW+kMSM=";
+    };
+
+    buildInputs = [
+      (pkgs.python3.withPackages (py: [ py.pyyaml ]))
+    ];
+
+    dontConfigure = true;
+    dontBuild = true;
+
+    installPhase = ''
+      runHook preInstall
+      mkdir -p $out/share
+      cp -r usr/share/jupiter-fan-control $out/share
+      chmod +x $out/share/jupiter-fan-control/fancontrol.py
+      runHook postInstall
+    '';
+  };
+
+  # 3. Courbe ventilateur serveur 24/7 optionnelle (API sysfs fan1_target RPM)
   steamdeckServerFanDaemon = pkgs.writers.writePython3Bin "steamdeck-server-fan" {
     doCheck = false;
   } ''
@@ -94,7 +131,6 @@ let
             time.sleep(0.5)
 
         if not sd:
-            # Pas sur un Steam Deck (ex. VM de test) : quitte proprement sans échec systemd
             print("[steamdeck-server-fan] steamdeck_hwmon/fan1_target non détecté (matériel non-Steam Deck), arrêt propre.", flush=True)
             return 0
 
@@ -106,7 +142,6 @@ let
                 try:
                     temp = read_max_temp_c()
                     rpm = interp_rpm(temp)
-                    # Hystérésis douce (+/- 150 RPM) sauf en montée thermique rapide
                     if rpm > last_rpm or abs(rpm - last_rpm) >= 150 or last_rpm == 0:
                         fan_target.write_text(str(rpm) + "\n", encoding="utf-8")
                         last_rpm = rpm
@@ -114,7 +149,6 @@ let
                     print("[steamdeck-server-fan] Erreur lecture/écriture hwmon : " + str(exc), file=sys.stderr, flush=True)
                 time.sleep(2.0)
         finally:
-            # Sécurité Valve officielle : écrire 0 dans fan1_target rend le contrôle à l'EC
             try:
                 fan_target.write_text("0\n", encoding="utf-8")
             except Exception:
@@ -125,7 +159,7 @@ let
         sys.exit(main())
   '';
 
-  # Script utilitaire pour couper ou rallumer physiquement la dalle + rétroéclairage (LCD & OLED)
+  # 4. Script utilitaire pour couper ou rallumer physiquement dalle + rétroéclairage + LED de charge
   steamdeckScreenCtl = pkgs.writeShellScriptBin "steamdeck-screen" ''
     set -eu
     action="''${1:-off}"
@@ -141,18 +175,21 @@ let
       for fb in /sys/class/graphics/fb*/blank; do
         [ -w "$fb" ] && echo 0 > "$fb" || true
       done
+      [ -w /sys/class/leds/status:white/led_brightness_multiplier ] && echo 100 > /sys/class/leds/status:white/led_brightness_multiplier || true
     else
       for bl in /sys/class/backlight/*; do
         [ -d "$bl" ] || continue
         [ -w "$bl/brightness" ] && echo 0 > "$bl/brightness" || true
         [ -w "$bl/bl_power" ] && echo 4 > "$bl/bl_power" || true
       done
-      # Contrôleur rétroéclairage OLED Galileo (i2c-ANX7580A) si présent
       oled_bl="/sys/devices/platform/AMDI0010:02/i2c-2/i2c-ANX7580A:00/brightness"
       [ -w "$oled_bl" ] && echo 0 > "$oled_bl" || true
       for fb in /sys/class/graphics/fb*/blank; do
         [ -w "$fb" ] && echo 4 > "$fb" || true
       done
+      # Éteint la LED blanche de charge (via leds-steamdeck.ko)
+      [ -w /sys/class/leds/status:white/brightness ] && echo 0 > /sys/class/leds/status:white/brightness || true
+      [ -w /sys/class/leds/status:white/led_brightness_multiplier ] && echo 0 > /sys/class/leds/status:white/led_brightness_multiplier || true
     fi
   '';
 
@@ -160,11 +197,6 @@ in
 {
   imports = [
     ../nixos/cockpit-nixos-module.nix
-    (
-      (builtins.fetchTarball {
-        url = "https://github.com/Jovian-Experiments/Jovian-NixOS/archive/development.tar.gz";
-      }) + "/modules"
-    )
   ] ++ lib.optional (builtins.pathExists /etc/nixos/cockpit-managed.nix) /etc/nixos/cockpit-managed.nix;
 
   options.services.steamdeck-server = {
@@ -183,13 +215,19 @@ in
     screenAutoOff = lib.mkOption {
       type = lib.types.bool;
       default = true;
-      description = "Active DPMS powerdown + extinction physique du rétroéclairage et de la dalle 60s après le démarrage (anti burn-in OLED & zéro lumière LCD).";
+      description = "Active DPMS powerdown + extinction physique du rétroéclairage, de la dalle et de la LED de charge 60s après le boot.";
     };
 
     disableInternalDisplay = lib.mkOption {
       type = lib.types.bool;
       default = false;
-      description = "Désactive totalement la dalle interne du Steam Deck au niveau noyau (video=eDP-1:d) dès la sortie du bootloader (un écran externe USB-C/HDMI reste utilisable).";
+      description = "Désactive totalement la dalle interne du Steam Deck au niveau noyau (video=eDP-1:d) dès la sortie du bootloader.";
+    };
+
+    batteryChargeLimit = lib.mkOption {
+      type = lib.types.nullOr (lib.types.ints.between 20 100);
+      default = 80;
+      description = "Plafond de charge batterie en % (via steamdeck_hwmon/max_battery_charge_level) pour protéger la batterie en usage serveur 24/7. Mettre à null pour désactiver.";
     };
   };
 
@@ -224,32 +262,73 @@ in
         nssmdns4 = lib.mkDefault true;
       };
 
-      users.users = lib.genAttrs cfgFan.adminUsers (name: {
+      users.users = lib.genAttrs cfgDeck.adminUsers (name: {
         extraGroups = [ "wheel" "networkmanager" ]
           ++ lib.optional config.services.cockpit-nixos.enableMachines "libvirtd";
       });
 
       # --------------------------------------------------------------------------
-      # 2. Drivers Steam Deck minimaux (UNIQUEMENT kernel Neptune + ventilateur)
+      # 2. Modules noyau Steam Deck (out-of-tree) + jupiter-fan-control (Valve)
       # --------------------------------------------------------------------------
-      # On laisse jovian.devices.steamdeck.enable = false pour ne PAS compiler
-      # PipeWire, WirePlumber, steamdeck-dsp, Mesa 32/64-bit, Xorg ou fwupd.
-      jovian = {
-        devices.steamdeck = {
-          enable = lib.mkDefault false;
-          enableKernelPatches = lib.mkDefault true; # Kernel Neptune Valve (steamdeck + steamdeck_hwmon)
-          enableOsFanControl = lib.mkDefault (!cfgFan.enableCustomFanCurve); # jupiter-fan-control
-          enableDefaultStage1Modules = lib.mkDefault true; # Modules initrd NVMe/SD/USB du Deck
-          autoUpdate = lib.mkDefault false;
+      # Utilise le noyau NixOS standard (cache binaire) + compile uniquement nos 3 .ko
+      boot.extraModulePackages = [ steamdeckEcModules ];
+
+      # Démon ventilateur officiel Valve (LCD Jupiter & OLED Galileo ; quitte avec exit 0 hors Steam Deck)
+      systemd.services.jupiter-fan-control = lib.mkIf (!cfgDeck.enableCustomFanCurve) {
+        description = "Valve Steam Deck (Jupiter/Galileo) userspace fan controller";
+        wantedBy = [ "multi-user.target" ];
+        path = [ pkgs.dmidecode ];
+        unitConfig.ConditionVirtualization = "!vm";
+        serviceConfig = {
+          ExecStart = "${jupiterFanControl}/share/jupiter-fan-control/fancontrol.py --run";
+          ExecStopPost = "${jupiterFanControl}/share/jupiter-fan-control/fancontrol.py --stop";
+          OOMScoreAdjust = -1000;
+          Restart = "on-failure";
+          StandardOutput = "null";
         };
-        steam.enable = lib.mkDefault false;
+        environment = {
+          PYTHONUNBUFFERED = "1";
+        };
       };
 
-      # Firmwares Steam Deck LCD/OLED (stdenvNoCC, aucune compilation)
-      hardware.firmware = [
-        pkgs.linux-firmware
-        (lib.hiPrio pkgs.jovianPackages.linux-firmware-holo)
-      ];
+      # Courbe ventilateur serveur optionnelle (si services.steamdeck-server.enableCustomFanCurve = true)
+      systemd.services.steamdeck-server-fan = lib.mkIf cfgDeck.enableCustomFanCurve {
+        description = "Courbe ventilateur serveur 24/7 via steamdeck_hwmon (fan1_target RPM)";
+        after = [ "multi-user.target" ];
+        wantedBy = [ "multi-user.target" ];
+        unitConfig.ConditionVirtualization = "!vm";
+        serviceConfig = {
+          Type = "simple";
+          ExecStart = "${steamdeckServerFanDaemon}/bin/steamdeck-server-fan";
+          OOMScoreAdjust = -1000;
+          Restart = "on-failure";
+          RestartSec = "5s";
+        };
+      };
+
+      # Plafond de charge batterie 24/7 (protège la batterie lithium contre le gonflement)
+      systemd.services.steamdeck-battery-limit = lib.mkIf (cfgDeck.batteryChargeLimit != null) {
+        description = "Limite la charge batterie Steam Deck (${toString cfgDeck.batteryChargeLimit}%) pour usage serveur 24/7";
+        after = [ "multi-user.target" ];
+        wantedBy = [ "multi-user.target" ];
+        unitConfig.ConditionVirtualization = "!vm";
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = "${pkgs.writeShellScript "steamdeck-set-charge-limit" ''
+            for hw in /sys/class/hwmon/hwmon*; do
+              [ -r "$hw/name" ] || continue
+              name=$(cat "$hw/name")
+              if [ "$name" = "steamdeck_hwmon" ] || [ "$name" = "jupiter" ]; then
+                if [ -w "$hw/max_battery_charge_level" ]; then
+                  echo ${toString cfgDeck.batteryChargeLimit} > "$hw/max_battery_charge_level" || true
+                fi
+              fi
+            done
+          ''}";
+        };
+      };
+
       hardware.enableRedistributableFirmware = lib.mkDefault true;
       hardware.cpu.amd.updateMicrocode = lib.mkDefault true;
       nixpkgs.config.allowUnfree = lib.mkDefault true;
@@ -261,16 +340,20 @@ in
         steamdeckScreenCtl
       ];
 
-      # Extinction console après 60s + niveau de log console réduit (loglevel=3)
-      # + désactivation matérielle eDP-1 optionnelle (video=eDP-1:d)
-      # (les drivers steamdeck/steamdeck_hwmon/k10temp sont auto-chargés par le kernel Neptune via ACPI/PCI)
+      # --------------------------------------------------------------------------
+      # 3. Tuning Serveur 24/7 : Anti-veille, loglevel=3 & Extinction écran / LED
+      # --------------------------------------------------------------------------
       boot.consoleLogLevel = lib.mkDefault 3;
       boot.kernelParams =
         [ "consoleblank=60" ]
-        ++ lib.optional cfgFan.disableInternalDisplay "video=eDP-1:d";
+        ++ lib.optional cfgDeck.disableInternalDisplay "video=eDP-1:d";
 
-      # Active le vrai mode DPMS powerdown sur la console TTY1 (au lieu d'un simple écran noir rétroéclairé)
-      systemd.services.steamdeck-screen-powersave = lib.mkIf (cfgFan.screenAutoOff && !cfgFan.disableInternalDisplay) {
+      systemd.targets.sleep.enable = lib.mkDefault false;
+      systemd.targets.suspend.enable = lib.mkDefault false;
+      systemd.targets.hibernate.enable = lib.mkDefault false;
+      systemd.targets.hybrid-sleep.enable = lib.mkDefault false;
+
+      systemd.services.steamdeck-screen-powersave = lib.mkIf (cfgDeck.screenAutoOff && !cfgDeck.disableInternalDisplay) {
         description = "Configure DPMS powerdown sur la console Steam Deck";
         wantedBy = [ "multi-user.target" ];
         unitConfig.ConditionVirtualization = "!vm";
@@ -283,9 +366,8 @@ in
         };
       };
 
-      # Coupe physiquement le rétroéclairage & la dalle 60s après le démarrage (LCD & OLED)
-      systemd.services.steamdeck-backlight-off = lib.mkIf (cfgFan.screenAutoOff && !cfgFan.disableInternalDisplay) {
-        description = "Éteint physiquement le rétroéclairage et la dalle Steam Deck (anti burn-in)";
+      systemd.services.steamdeck-backlight-off = lib.mkIf cfgDeck.screenAutoOff {
+        description = "Éteint physiquement le rétroéclairage, la dalle et la LED de charge Steam Deck";
         unitConfig.ConditionVirtualization = "!vm";
         serviceConfig = {
           Type = "oneshot";
@@ -293,35 +375,14 @@ in
         };
       };
 
-      systemd.timers.steamdeck-backlight-off = lib.mkIf (cfgFan.screenAutoOff && !cfgFan.disableInternalDisplay) {
-        description = "Minuterie d'extinction de l'écran Steam Deck 60s après le boot";
+      systemd.timers.steamdeck-backlight-off = lib.mkIf cfgDeck.screenAutoOff {
+        description = "Minuterie d'extinction de l'écran et LED Steam Deck 60s après le boot";
         wantedBy = [ "timers.target" ];
         unitConfig.ConditionVirtualization = "!vm";
         timerConfig = {
           OnBootSec = "60s";
           AccuracySec = "5s";
           Unit = "steamdeck-backlight-off.service";
-        };
-      };
-
-      # Empêche toute mise en veille en mode serveur 24/7
-      systemd.targets.sleep.enable = lib.mkDefault false;
-      systemd.targets.suspend.enable = lib.mkDefault false;
-      systemd.targets.hibernate.enable = lib.mkDefault false;
-      systemd.targets.hybrid-sleep.enable = lib.mkDefault false;
-
-      # Courbe ventilateur serveur optionnelle (si services.steamdeck-server.enableCustomFanCurve = true)
-      systemd.services.steamdeck-server-fan = lib.mkIf cfgFan.enableCustomFanCurve {
-        description = "Courbe ventilateur serveur 24/7 via steamdeck_hwmon (fan1_target RPM)";
-        after = [ "multi-user.target" ];
-        wantedBy = [ "multi-user.target" ];
-        unitConfig.ConditionVirtualization = "!vm";
-        serviceConfig = {
-          Type = "simple";
-          ExecStart = "${steamdeckServerFanDaemon}/bin/steamdeck-server-fan";
-          OOMScoreAdjust = -1000;
-          Restart = "on-failure";
-          RestartSec = "5s";
         };
       };
     }
