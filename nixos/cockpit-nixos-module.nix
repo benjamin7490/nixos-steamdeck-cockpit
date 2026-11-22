@@ -474,11 +474,10 @@ in
         };
       };
 
-      # Enregistrement D-Bus des bridges déclaratifs FirewallD1, PackageKit et libvirt-dbus
+      # Enregistrement D-Bus des bridges déclaratifs FirewallD1 et PackageKit
       services.dbus.packages =
         lib.optional cfg.enableFirewallBridge firewallBridgeDbusPackage
-        ++ lib.optional cfg.enablePackageKitBridge packageKitBridgeDbusPackage
-        ++ lib.optional cfg.enableMachines pkgs.libvirt-dbus;
+        ++ lib.optional cfg.enablePackageKitBridge packageKitBridgeDbusPackage;
 
       # Bridge D-Bus org.fedoraproject.FirewallD1 -> networking.firewall (NixOS)
       systemd.services.cockpit-nixos-firewall-bridge = lib.mkIf cfg.enableFirewallBridge {
@@ -651,6 +650,19 @@ in
         ];
       };
     }
+
+    # Active libvirt-dbus (requis par cockpit-machines : /etc/systemd/system/libvirt-dbus.service)
+    (if (options.virtualisation.libvirtd ? dbus) then {
+      virtualisation.libvirtd.dbus.enable = lib.mkIf cfg.enableMachines true;
+    } else lib.mkIf cfg.enableMachines {
+      systemd.packages = [ pkgs.libvirt-dbus ];
+      services.dbus.packages = [ pkgs.libvirt-dbus ];
+      users.users.libvirtdbus = {
+        isSystemUser = true;
+        group = "libvirtdbus";
+      };
+      users.groups.libvirtdbus = { };
+    })
 
     # Enregistrement natif des plugins Cockpit (NixOS 25.11+/unstable)
     (lib.optionalAttrs (options.services.cockpit ? plugins) {
