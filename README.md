@@ -23,8 +23,8 @@ A NixOS module and **Cockpit** integration that make Cockpit's **real built-in m
 - **Automatic Upgrades & Background Boot Health-Checker (openSUSE MicroOS–style)**:
   - Nightly `system.autoUpgrade` with a configurable reboot window (`03:00`–`05:30`) and weekly `nix.gc` retaining the last 14 days of generations.
   - Pure background systemd protection (no extra UI clutter; inspect logs natively in Cockpit *Logs* / *Services* or `journalctl -u nixos-health-checker`): hardware watchdog + `panic=10`, native `systemd-boot` `bootCounting` (when available in `nixpkgs`), early boot-loop counter, and health probes gating `boot-complete.target`. Repeated boot failures on a new generation trigger an **automatic rollback** to the last known-good generation.
-- **Steam Deck Headless Server Profile (via Jovian-NixOS)**:
-  - Valve Neptune kernel with `steamdeck` / `steamdeck_hwmon` drivers and `jupiter-fan-control` (plus an optional 24/7 server fan curve daemon).
+- **Minimal Steam Deck Headless Server Profile (via Jovian-NixOS)**:
+  - Pulls **only** Valve's Neptune kernel (`steamdeck` / `steamdeck_hwmon`), `jupiter-fan-control` (plus an optional 24/7 server fan curve daemon), and Holo Wi-Fi/APU firmware — explicitly skipping desktop bloat (no PipeWire, WirePlumber, `steamdeck-dsp`, custom 32/64-bit Mesa, Xorg, or `fwupd` builds).
   - Headless tuning: Steam/Gamescope disabled, sleep/suspend disabled, `consoleblank=60` + DPMS powerdown + automatic backlight/panel power-off after 60 s (`steamdeck-screen on|off` helper), plus optional kernel-level display disable (`video=eDP-1:d`) for zero light & zero OLED burn-in.
 
 ---

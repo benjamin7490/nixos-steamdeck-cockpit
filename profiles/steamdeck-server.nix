@@ -230,18 +230,26 @@ in
       });
 
       # --------------------------------------------------------------------------
-      # 2. Drivers Steam Deck (kernel Neptune + ventilateur) & Tuning Serveur 24/7
+      # 2. Drivers Steam Deck minimaux (UNIQUEMENT kernel Neptune + ventilateur)
       # --------------------------------------------------------------------------
+      # On laisse jovian.devices.steamdeck.enable = false pour ne PAS compiler
+      # PipeWire, WirePlumber, steamdeck-dsp, Mesa 32/64-bit, Xorg ou fwupd.
       jovian = {
         devices.steamdeck = {
-          enable = lib.mkDefault true;
-          autoUpdate = lib.mkDefault false; # Pas de flash BIOS/EC surprise sur un serveur
-          # Désactive proprement jupiter-fan-control si la courbe serveur custom est choisie
-          enableOsFanControl = lib.mkIf cfgFan.enableCustomFanCurve (lib.mkForce false);
+          enable = lib.mkDefault false;
+          enableKernelPatches = lib.mkDefault true; # Kernel Neptune Valve (steamdeck + steamdeck_hwmon)
+          enableOsFanControl = lib.mkDefault (!cfgFan.enableCustomFanCurve); # jupiter-fan-control
+          enableDefaultStage1Modules = lib.mkDefault true; # Modules initrd NVMe/SD/USB du Deck
+          autoUpdate = lib.mkDefault false;
         };
-        steam.enable = lib.mkDefault false; # Mode serveur headless (pas de Gamescope/Steam UI)
+        steam.enable = lib.mkDefault false;
       };
 
+      # Firmwares Steam Deck LCD/OLED (stdenvNoCC, aucune compilation)
+      hardware.firmware = [
+        pkgs.linux-firmware
+        (lib.hiPrio pkgs.jovianPackages.linux-firmware-holo)
+      ];
       hardware.enableRedistributableFirmware = lib.mkDefault true;
       hardware.cpu.amd.updateMicrocode = lib.mkDefault true;
       nixpkgs.config.allowUnfree = lib.mkDefault true;
