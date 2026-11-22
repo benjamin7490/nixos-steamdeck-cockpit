@@ -1,0 +1,32 @@
+{
+  "version": 0,
+  "name": "updates",
+  "priority": 10,
+  "requires": {
+    "cockpit": "250"
+  },
+  "tools": {
+    "index": {
+      "label": "Mises à jour logicielles",
+      "order": 85,
+      "keywords": [
+        {
+          "matches": [
+            "updates",
+            "mises à jour",
+            "software updates",
+            "generations",
+            "générations",
+            "rollback",
+            "nixos",
+            "gc"
+          ]
+        }
+      ]
+    }
+  },
+  "preload": [
+    "index"
+  ],
+  "content-security-policy": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; img-src 'self' data:;"
+}

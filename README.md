@@ -13,14 +13,13 @@ A NixOS module and **Cockpit** integration that make Cockpit's **real built-in m
 ## Features
 
 - **Real Native Cockpit Modules — Adapted Declaratively to NixOS**:
-  - **Software Updates (`pkg/packagekit`)**: powered by a full `org.freedesktop.PackageKit` D-Bus bridge (aliased as `packagekit.service`). Checking for updates runs `nix-channel --update` + `nix store diff-closures`, applying updates runs `nixos-rebuild switch --upgrade` (detecting kernel restarts), and PackageKit install/remove transactions route into `/etc/nixos/cockpit-managed.nix`.
-  - **Storage (`pkg/storaged` / `udisks2`)**: enables `udisks2`, `smartd`, and the full disk/filesystem toolset (`parted`, `e2fsprogs`, `btrfs-progs`, `xfsprogs`, `dosfstools`, `ntfs3g`, `cryptsetup`, `lvm2`, `mdadm`, `nfs-utils`, `cifs-utils`). Keeps `/etc/fstab` writable (`mode = "0644"`) for `cockpit-storaged` and intercepts mounts under `/mnt/`, `/srv/`, `/media/`, and `/data/` into declarative `fileSystems` entries in `/etc/nixos/cockpit-managed.nix` (preserving static NixOS mounts).
+  - **Software Updates (`/updates`, MicroOS `cockpit-tukit` style)**: implements Cockpit's official `"name": "updates"` slot (`priority: 10`, with native `page_status` reporting directly onto Cockpit's *Overview* page), combining NixOS update checks (`nix-channel --update` + `nix store diff-closures`), transactional upgrades (`nixos-rebuild switch --upgrade` + kernel reboot detection), atomic **NixOS Generations & Rollbacks**, **`nix-collect-garbage -d`**, Nix store optimization, and a collapsible `/etc/nixos/cockpit-managed.nix` preview — backed by an `org.freedesktop.PackageKit` D-Bus bridge for full PackageKit compatibility.
+  - **Storage (`pkg/storaged` / `udisks2`)**: enables `udisks2`, `smartd` (skipped cleanly in VMs via `ConditionVirtualization=!vm`), and the full disk/filesystem toolset (`parted`, `e2fsprogs`, `btrfs-progs`, `xfsprogs`, `dosfstools`, `ntfs3g`, `cryptsetup`, `lvm2`, `mdadm`, `nfs-utils`, `cifs-utils`). Keeps `/etc/fstab` writable (`mode = "0644"`) for `cockpit-storaged` and intercepts mounts under `/mnt/`, `/srv/`, `/media/`, and `/data/` into declarative `fileSystems` entries in `/etc/nixos/cockpit-managed.nix` (preserving static NixOS mounts).
   - **Networking (`pkg/networkmanager`)**: watches `NetworkManager` profile edits and syncs them into `networking.networkmanager.ensureProfiles.profiles` (3 s debounce, SHA-256 anti-loop guard, ephemeral Podman/Libvirt/veth filtering).
   - **Firewall (native *Networking → Firewall* UI)**: registers a full `org.fedoraproject.FirewallD1` D-Bus bridge (aliased as `firewalld.service`) translating Cockpit's Firewall UI directly into NixOS's native `networking.firewall` without running imperative `firewalld`.
   - **Podman, KVM & Files**: turnkey `cockpit-podman` (`dockerCompat`, `dockerSocket`, internal DNS, weekly `autoPrune`), `cockpit-machines` (`libvirtd`, `libvirt-dbus`, `virt-manager`, `swtpm`), and `cockpit-files` (`/srv/data`, `/srv/shares`, `/mnt/storage`).
-- **Two Thin Complementary Sidebar Tabs (Exact Cockpit PatternFly 6 CSS + Light/Dark Sync)**:
-  - **Paquets**: declarative `nixpkgs` search and `environment.systemPackages` add/remove UI complementing Cockpit's native *Software Updates* tab.
-  - **Générations**: NixOS equivalent of Fedora CoreOS's `cockpit-ostree` / openSUSE MicroOS's `cockpit-tukit` — list and switch NixOS generations atomically, **Roll back** with one click, run **`nix-collect-garbage -d`**, optimize the Nix store, monitor live **`hwmon` hardware telemetry**, and inspect `/etc/nixos/cockpit-managed.nix`.
+- **Declarative Package Manager (`Paquets` Tab, Exact Cockpit PatternFly 6 CSS + Light/Dark Sync)**:
+  - Search `nixpkgs` and add/remove packages declaratively in `environment.systemPackages` (`/etc/nixos/cockpit-managed.nix`), linked directly to the native **Software Updates (`/updates`)** tab.
 - **Automatic Upgrades & Background Boot Health-Checker (openSUSE MicroOS–style)**:
   - Nightly `system.autoUpgrade` with a configurable reboot window (`03:00`–`05:30`) and weekly `nix.gc` retaining the last 14 days of generations.
   - Pure background systemd protection (no extra UI clutter; inspect logs natively in Cockpit *Logs* / *Services* or `journalctl -u nixos-health-checker`): hardware watchdog + `panic=10`, native `systemd-boot` `bootCounting` (when available in `nixpkgs`), early boot-loop counter, and health probes gating `boot-complete.target`. Repeated boot failures on a new generation trigger an **automatic rollback** to the last known-good generation.
@@ -214,9 +213,10 @@ flowchart TB
 │   ├── cockpit-nixos-module.nix            # Generic reusable NixOS module (services.cockpit-nixos.*)
 │   └── configuration.nix                   # Full reference configuration.nix
 ├── plugin/                                 # Cockpit frontend (exact Cockpit PatternFly 6 CSS, strict CSP)
-│   ├── manifest.json                       # Registers 2 complementary sidebar entries (Paquets, Générations)
+│   ├── updates-manifest.json               # Official Cockpit "updates" slot (/updates, priority 10)
+│   ├── updates.html                        # MicroOS-style Software Updates, Generations, Rollback & GC
+│   ├── packages-manifest.json              # Declarative NixOS Packages sidebar tab
 │   ├── packages.html                       # Declarative nixpkgs search & environment.systemPackages UI
-│   ├── generations.html                    # Generations, Rollback, GC, hwmon telemetry & nix preview
 │   ├── style.css
 │   └── app.js
 └── backend/                                # Python 3 CLI, D-Bus bridges & watchers

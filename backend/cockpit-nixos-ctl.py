@@ -16,11 +16,13 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
 STATE_DIR = Path("/var/lib/cockpit-nixos")
 STATE_FILE = STATE_DIR / "state.json"
+UPDATES_CACHE = STATE_DIR / "pk-updates-cache.json"
 BACKUP_DIR = STATE_DIR / "backups"
 MANAGED_NIX = Path("/etc/nixos/cockpit-managed.nix")
 LOCK_FILE = Path("/run/lock/cockpit-nixos.lock")
@@ -302,6 +304,7 @@ def list_generations() -> list:
     current_target = ""
     if SYSTEM_PROFILE.is_symlink():
         current_target = os.readlink(SYSTEM_PROFILE)
+    booted_real = os.path.realpath("/run/booted-system") if Path("/run/booted-system").exists() else ""
 
     for link in sorted(glob.glob("/nix/var/nix/profiles/system-*-link")):
         p = Path(link)
@@ -325,10 +328,164 @@ def list_generations() -> list:
             "nixos_version": ver,
             "kernel": kernel,
             "current": (p.name == Path(current_target).name),
+            "booted": bool(booted_real and os.path.realpath(str(p)) == booted_real),
         })
 
     gens.sort(key=lambda x: x["id"], reverse=True)
     return gens
+
+
+def check_reboot_required() -> dict:
+    booted = Path("/run/booted-system")
+    nxt = SYSTEM_PROFILE
+    reboot_required = False
+    booted_kernel = ""
+    next_kernel = ""
+    try:
+        if booted.exists() and nxt.exists():
+            for sub in ("kernel", "initrd", "kernel-modules"):
+                bp = booted / sub
+                np = nxt / sub
+                if bp.exists() and np.exists() and os.path.realpath(str(bp)) != os.path.realpath(str(np)):
+                    reboot_required = True
+            bmod = booted / "kernel-modules" / "lib" / "modules"
+            nmod = nxt / "kernel-modules" / "lib" / "modules"
+            if bmod.exists():
+                bdirs = [d.name for d in bmod.iterdir() if d.is_dir()]
+                if bdirs:
+                    booted_kernel = bdirs[0]
+            if nmod.exists():
+                ndirs = [d.name for d in nmod.iterdir() if d.is_dir()]
+                if ndirs:
+                    next_kernel = ndirs[0]
+    except Exception:
+        pass
+    return {
+        "reboot_required": reboot_required,
+        "booted_kernel": booted_kernel,
+        "next_kernel": next_kernel,
+    }
+
+
+def load_updates_cache() -> dict:
+    if not UPDATES_CACHE.exists():
+        return {"timestamp": 0, "updates": []}
+    try:
+        return json.loads(UPDATES_CACHE.read_text(encoding="utf-8"))
+    except Exception:
+        return {"timestamp": 0, "updates": []}
+
+
+def save_updates_cache(updates: list) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = UPDATES_CACHE.with_suffix(".json.tmp")
+    tmp.write_text(
+        json.dumps({"timestamp": int(time.time()), "updates": updates}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, UPDATES_CACHE)
+
+
+def cmd_updates_check() -> None:
+    ensure_root()
+
+    def _check():
+        print("[1/3] Mise à jour des canaux NixOS (nix-channel --update)...", flush=True)
+        stream_cmd(["nix-channel", "--update"], check=False)
+
+        print("[2/3] Évaluation de la prochaine génération (nixos-rebuild build --no-out-link)...", flush=True)
+        eval_res = subprocess.run(
+            ["nixos-rebuild", "build", "--no-out-link"],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        if eval_res.stderr:
+            sys.stdout.write(eval_res.stderr)
+            sys.stdout.flush()
+        if eval_res.returncode != 0:
+            raise RuntimeError("Échec de l'évaluation NixOS (code " + str(eval_res.returncode) + ").")
+
+        target_path = ""
+        for line in reversed((eval_res.stdout or "").splitlines()):
+            s = line.strip()
+            if s.startswith("/nix/store/"):
+                target_path = s
+                break
+
+        current_sys = os.path.realpath("/run/current-system")
+        updates = []
+        if target_path and Path(target_path).exists() and os.path.realpath(target_path) != current_sys:
+            print("[3/3] Calcul des différences de paquets (nix store diff-closures)...", flush=True)
+            diff_res = subprocess.run(
+                ["nix", "--extra-experimental-features", "nix-command", "store", "diff-closures", current_sys, target_path],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if diff_res.returncode == 0:
+                for line in diff_res.stdout.splitlines():
+                    m = re.match(r"^([a-zA-Z0-9._+-]+):\s+([^,\n]+)", line.strip())
+                    if not m:
+                        continue
+                    name, change = m.group(1), m.group(2).strip()
+                    if "->" not in change:
+                        continue
+                    parts = change.split("->", 1)
+                    old_v = parts[0].strip().lstrip("∅ ")
+                    new_v = parts[1].strip().split(",")[0].strip()
+                    if not new_v or new_v == "∅":
+                        continue
+                    is_sec = any(k in name.lower() for k in ("linux", "openssl", "openssh", "sudo", "polkit", "systemd", "glibc"))
+                    updates.append({
+                        "id": name + ";" + new_v + ";x86_64;nixos",
+                        "name": name,
+                        "old_version": old_v,
+                        "new_version": new_v,
+                        "info": 8 if is_sec else 5,
+                        "security": is_sec,
+                        "summary": "Mise à jour NixOS : " + old_v + " -> " + new_v,
+                    })
+                    if len(updates) >= 120:
+                        break
+            if not updates:
+                ver_file = Path(target_path) / "nixos-version"
+                new_ver = ver_file.read_text(encoding="utf-8").strip() if ver_file.exists() else "latest"
+                updates.append({
+                    "id": "nixos-system;" + new_ver + ";x86_64;nixos",
+                    "name": "nixos-system",
+                    "old_version": "current",
+                    "new_version": new_ver,
+                    "info": 5,
+                    "security": False,
+                    "summary": "Nouvelle génération système NixOS (" + new_ver + ")",
+                })
+
+        save_updates_cache(updates)
+        if updates:
+            print("Vérification terminée : " + str(len(updates)) + " mise(s) à jour disponible(s).", flush=True)
+        else:
+            print("Vérification terminée : le système NixOS est à jour.", flush=True)
+
+    with_lock(_check)
+
+
+def cmd_updates_apply() -> None:
+    ensure_root()
+
+    def _apply():
+        REBUILD_SENTINEL.parent.mkdir(parents=True, exist_ok=True)
+        REBUILD_SENTINEL.write_text(str(os.getpid()), encoding="utf-8")
+        try:
+            print("[1/2] Application des mises à jour NixOS (nixos-rebuild switch --upgrade)...", flush=True)
+            stream_cmd(["nixos-rebuild", "switch", "--upgrade"], check=True)
+            save_updates_cache([])
+            print("[2/2] Mises à jour appliquées sur une nouvelle génération NixOS.", flush=True)
+        finally:
+            REBUILD_SENTINEL.unlink(missing_ok=True)
+
+    with_lock(_apply)
 
 
 def read_hwmon_telemetry() -> dict:
@@ -575,6 +732,8 @@ def main() -> int:
                 "generations": list_generations(),
                 "managed_nix": managed,
                 "telemetry": read_hwmon_telemetry(),
+                "updates": load_updates_cache(),
+                "system_info": check_reboot_required(),
             }))
             return 0
 
@@ -745,6 +904,19 @@ def main() -> int:
         if cmd == "optimise-store":
             ensure_root()
             with_lock(lambda: stream_cmd(["nix-store", "--optimise"]))
+            return 0
+
+        if cmd == "updates-check":
+            cmd_updates_check()
+            return 0
+
+        if cmd == "updates-apply":
+            cmd_updates_apply()
+            return 0
+
+        if cmd == "reboot":
+            ensure_root()
+            stream_cmd(["systemctl", "reboot"])
             return 0
 
         print("Commande inconnue : " + cmd, file=sys.stderr)

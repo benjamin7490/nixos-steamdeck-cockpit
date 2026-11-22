@@ -1,18 +1,24 @@
 {
   "version": 0,
+  "name": "nixos-packages",
   "requires": {
     "cockpit": "250"
   },
   "menu": {
-    "packages": {
+    "index": {
       "label": "Paquets",
-      "path": "packages.html",
-      "order": 45
-    },
-    "generations": {
-      "label": "Générations",
-      "path": "generations.html",
-      "order": 46
+      "order": 45,
+      "keywords": [
+        {
+          "matches": [
+            "packages",
+            "paquets",
+            "nixpkgs",
+            "nixos",
+            "install"
+          ]
+        }
+      ]
     }
   },
   "content-security-policy": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; img-src 'self' data:;"

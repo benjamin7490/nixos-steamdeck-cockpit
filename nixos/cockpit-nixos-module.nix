@@ -139,19 +139,18 @@ let
   '';
 
   # 9. Dérivation du plugin Frontend Cockpit (PatternFly 6 exact extrait de pkgs.cockpit)
-  # Complète les briques natives Cockpit avec uniquement 2 onglets dédiés : Paquets & Générations
+  # Fournit :
+  #   - nixos-updates ("name": "updates", priority 10) : le VRAI onglet /updates
+  #     ('Mises à jour logicielles') façon openSUSE MicroOS (cockpit-tukit), avec
+  #     vérification/installation des MAJ NixOS, générations, rollbacks et statut dans Aperçu.
+  #   - nixos-packages : gestion déclarative des paquets nixpkgs (/etc/nixos/cockpit-managed.nix).
   cockpitNixosPlugin = pkgs.runCommand "cockpit-nixos-plugin" {
     nativeBuildInputs = [ pkgs.gzip ];
   } ''
-    mkdir -p $out/share/cockpit/nixos-manager
-    cp ${../plugin/manifest.json}    $out/share/cockpit/nixos-manager/manifest.json
-    cp ${../plugin/generations.html} $out/share/cockpit/nixos-manager/generations.html
-    cp ${../plugin/packages.html}    $out/share/cockpit/nixos-manager/packages.html
-    cp ${../plugin/style.css}        $out/share/cockpit/nixos-manager/style.css
-    cp ${../plugin/app.js}           $out/share/cockpit/nixos-manager/app.js
+    mkdir -p $out/share/cockpit/nixos-updates $out/share/cockpit/nixos-packages
 
     # Extrait la feuille PatternFly 6 compilée exacte de la version de Cockpit installée
-    touch $out/share/cockpit/nixos-manager/cockpit-patternfly.css
+    touch $out/share/cockpit/nixos-updates/cockpit-patternfly.css
     for candidate in \
       "${pkgs.cockpit}/share/cockpit/network/network.css" \
       "${pkgs.cockpit}/share/cockpit/network/network.css.gz" \
@@ -163,12 +162,25 @@ let
       "${pkgs.cockpit}/share/cockpit/shell/index.css.gz"; do
       if [ -f "$candidate" ]; then
         case "$candidate" in
-          *.gz) gzip -dc "$candidate" > $out/share/cockpit/nixos-manager/cockpit-patternfly.css ;;
-          *)    cp "$candidate" $out/share/cockpit/nixos-manager/cockpit-patternfly.css ;;
+          *.gz) gzip -dc "$candidate" > $out/share/cockpit/nixos-updates/cockpit-patternfly.css ;;
+          *)    cp "$candidate" $out/share/cockpit/nixos-updates/cockpit-patternfly.css ;;
         esac
         break
       fi
     done
+
+    # Module officiel "updates" (/updates — Mises à jour logicielles + Générations/Rollback)
+    cp ${../plugin/updates-manifest.json} $out/share/cockpit/nixos-updates/manifest.json
+    cp ${../plugin/updates.html}          $out/share/cockpit/nixos-updates/index.html
+    cp ${../plugin/style.css}             $out/share/cockpit/nixos-updates/style.css
+    cp ${../plugin/app.js}                $out/share/cockpit/nixos-updates/app.js
+
+    # Module "nixos-packages" (Paquets déclaratifs nixpkgs)
+    cp ${../plugin/packages-manifest.json} $out/share/cockpit/nixos-packages/manifest.json
+    cp ${../plugin/packages.html}          $out/share/cockpit/nixos-packages/index.html
+    cp ${../plugin/style.css}              $out/share/cockpit/nixos-packages/style.css
+    cp ${../plugin/app.js}                 $out/share/cockpit/nixos-packages/app.js
+    cp $out/share/cockpit/nixos-updates/cockpit-patternfly.css $out/share/cockpit/nixos-packages/cockpit-patternfly.css
   '';
 
   # Liste des plugins Cockpit à enregistrer
@@ -320,16 +332,11 @@ in
       # Expose /share/cockpit et /share/dbus-1 pour les plugins et services D-Bus
       environment.pathsToLink = [ "/share/cockpit" "/share/dbus-1" ];
 
-      # Active le VRAI onglet natif Mises à jour logicielles (PackageKit) via notre bridge D-Bus
-      # (ou le masque proprement si enablePackageKitBridge = false)
-      environment.etc."cockpit/packagekit.override.json".text = builtins.toJSON (
-        if cfg.enablePackageKitBridge then
-          { conditions = [ ]; }
-        else
-          { menu = { updates = null; }; tools = { updates = null; }; }
-      );
-
       # Garantit la visibilité du VRAI onglet natif Stockage (cockpit-storaged / udisks2)
+      # Placé dans /etc/xdg/cockpit (XDG_CONFIG_DIRS sur NixOS) ET /etc/cockpit
+      environment.etc."xdg/cockpit/storaged.override.json" = lib.mkIf cfg.enableFiles {
+        text = builtins.toJSON { conditions = [ ]; };
+      };
       environment.etc."cockpit/storaged.override.json" = lib.mkIf cfg.enableFiles {
         text = builtins.toJSON { conditions = [ ]; };
       };
@@ -412,9 +419,13 @@ in
         "d /var/lib/nixos-health-checker 0755 root root -"
       ];
 
-      # UDisks2 + SMART + support NTFS pour le VRAI onglet natif Stockage (cockpit-storaged)
+      # UDisks2 + SMART (ignoré proprement en VM sans disques physiques) + support NTFS
       services.udisks2.enable = lib.mkDefault cfg.enableFiles;
-      services.smartd.enable = lib.mkDefault cfg.enableFiles;
+      services.smartd = {
+        enable = lib.mkDefault cfg.enableFiles;
+        extraOptions = lib.mkDefault [ "--quit=never" ];
+      };
+      systemd.services.smartd.unitConfig.ConditionVirtualization = lib.mkIf cfg.enableFiles (lib.mkDefault "!vm");
       boot.supportedFilesystems = lib.optionals cfg.enableFiles [ "ntfs" ];
 
       # Intercepteur déclaratif Stockage/UDisks2/fstab -> /etc/nixos/cockpit-managed.nix
