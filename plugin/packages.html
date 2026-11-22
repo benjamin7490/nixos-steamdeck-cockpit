@@ -14,11 +14,12 @@
       <section class="pf-v6-c-page__main-section pf-m-light">
         <div class="nixos-page-header">
           <div>
-            <h1 class="pf-v6-c-title pf-m-2xl">Paquets NixOS</h1>
-            <p class="nixos-muted">Gestion déclarative de <code>environment.systemPackages</code> dans <code>/etc/nixos/cockpit-managed.nix</code> (remplace PackageKit).</p>
+            <h1 class="pf-v6-c-title pf-m-2xl">Paquets</h1>
+            <p class="nixos-muted">Installation et suppression déclaratives dans <code>environment.systemPackages</code> (<code>/etc/nixos/cockpit-managed.nix</code>), en complément de l'onglet natif Mises à jour logicielles.</p>
           </div>
           <div class="nixos-actions">
             <span id="admin-badge" class="pf-v6-c-label pf-m-orange"><span class="pf-v6-c-label__content">Vérification droits...</span></span>
+            <button id="btn-open-updates" class="pf-v6-c-button pf-m-secondary" type="button">Mises à jour logicielles</button>
             <button id="btn-refresh-all" class="pf-v6-c-button pf-m-secondary" type="button">Actualiser</button>
             <button id="btn-dry-build" class="pf-v6-c-button pf-m-secondary" type="button">Dry-Build</button>
             <button id="btn-rebuild-now" class="pf-v6-c-button pf-m-primary" type="button">Rebuild &amp; Switch</button>

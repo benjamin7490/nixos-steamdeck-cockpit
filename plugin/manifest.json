@@ -4,20 +4,15 @@
     "cockpit": "250"
   },
   "menu": {
-    "generations": {
-      "label": "Générations NixOS",
-      "path": "generations.html",
-      "order": 25
-    },
     "packages": {
-      "label": "Paquets NixOS",
+      "label": "Paquets",
       "path": "packages.html",
-      "order": 26
+      "order": 45
     },
-    "config": {
-      "label": "Configuration NixOS",
-      "path": "config.html",
-      "order": 27
+    "generations": {
+      "label": "Générations",
+      "path": "generations.html",
+      "order": 46
     }
   },
   "content-security-policy": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; img-src 'self' data:;"

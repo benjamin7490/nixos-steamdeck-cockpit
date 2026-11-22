@@ -13,12 +13,17 @@ let
     doCheck = false;
   } (builtins.readFile ../backend/cockpit-nixos-net-intercept.py);
 
-  # 3. Health-Checker & Auto-Rollback (style openSUSE MicroOS)
+  # 3. Intercepteur Stockage / UDisks2 / fstab -> /etc/nixos/cockpit-managed.nix
+  cockpitNixosStorageIntercept = pkgs.writers.writePython3Bin "cockpit-nixos-storage-intercept" {
+    doCheck = false;
+  } (builtins.readFile ../backend/cockpit-nixos-storage-intercept.py);
+
+  # 4. Health-Checker & Auto-Rollback (style openSUSE MicroOS)
   nixosHealthChecker = pkgs.writers.writePython3Bin "nixos-health-checker" {
     doCheck = false;
   } (builtins.readFile ../backend/nixos-health-checker.py);
 
-  # 4. Bridge D-Bus Pare-feu (org.fedoraproject.FirewallD1 -> networking.firewall)
+  # 5. Bridge D-Bus Pare-feu (org.fedoraproject.FirewallD1 -> networking.firewall)
   cockpitNixosFirewallBridge = pkgs.writers.writePython3Bin "cockpit-nixos-firewall-bridge" {
     doCheck = false;
     libraries = with pkgs.python3Packages; [
@@ -27,8 +32,19 @@ let
     ];
   } (builtins.readFile ../backend/cockpit-nixos-firewall-bridge.py);
 
-  # 5. Paquet D-Bus policy pour autoriser le bridge FirewallD1 (restreint à root + wheel)
-  firewallBridgeDbusPolicy = pkgs.writeTextDir "share/dbus-1/system.d/org.fedoraproject.FirewallD1.conf" ''
+  # 6. Bridge D-Bus Mises à jour & Paquets (org.freedesktop.PackageKit -> NixOS)
+  cockpitNixosPackageKitBridge = pkgs.writers.writePython3Bin "cockpit-nixos-packagekit-bridge" {
+    doCheck = false;
+    libraries = with pkgs.python3Packages; [
+      dbus-python
+      pygobject3
+    ];
+  } (builtins.readFile ../backend/cockpit-nixos-packagekit-bridge.py);
+
+  # 7. Politique + service D-Bus pour le bridge FirewallD1 (restreint à root + wheel)
+  firewallBridgeDbusPackage = pkgs.runCommand "cockpit-nixos-firewall-dbus" { } ''
+    mkdir -p $out/share/dbus-1/system.d $out/share/dbus-1/system-services
+    cat > $out/share/dbus-1/system.d/org.fedoraproject.FirewallD1.conf << 'EOF'
     <!DOCTYPE busconfig PUBLIC
      "-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN"
      "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
@@ -71,9 +87,59 @@ let
               send_member="removeService"/>
       </policy>
     </busconfig>
+    EOF
+    cat > $out/share/dbus-1/system-services/org.fedoraproject.FirewallD1.service << 'EOF'
+    [D-BUS Service]
+    Name=org.fedoraproject.FirewallD1
+    Exec=/bin/false
+    User=root
+    SystemdService=firewalld.service
+    EOF
   '';
 
-  # 6. Dérivation du plugin Frontend Cockpit (PatternFly 6 extrait directement de pkgs.cockpit)
+  # 8. Politique + service D-Bus pour le bridge PackageKit (restreint à root + wheel)
+  packageKitBridgeDbusPackage = pkgs.runCommand "cockpit-nixos-packagekit-dbus" { } ''
+    mkdir -p $out/share/dbus-1/system.d $out/share/dbus-1/system-services
+    cat > $out/share/dbus-1/system.d/org.freedesktop.PackageKit.conf << 'EOF'
+    <!DOCTYPE busconfig PUBLIC
+     "-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN"
+     "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+    <busconfig>
+      <policy user="root">
+        <allow own="org.freedesktop.PackageKit"/>
+        <allow send_destination="org.freedesktop.PackageKit"/>
+      </policy>
+      <policy group="wheel">
+        <allow send_destination="org.freedesktop.PackageKit"/>
+      </policy>
+      <policy context="default">
+        <deny own="org.freedesktop.PackageKit"/>
+        <deny send_destination="org.freedesktop.PackageKit"
+              send_interface="org.freedesktop.PackageKit.Transaction"
+              send_member="RefreshCache"/>
+        <deny send_destination="org.freedesktop.PackageKit"
+              send_interface="org.freedesktop.PackageKit.Transaction"
+              send_member="UpdatePackages"/>
+        <deny send_destination="org.freedesktop.PackageKit"
+              send_interface="org.freedesktop.PackageKit.Transaction"
+              send_member="InstallPackages"/>
+        <deny send_destination="org.freedesktop.PackageKit"
+              send_interface="org.freedesktop.PackageKit.Transaction"
+              send_member="RemovePackages"/>
+      </policy>
+    </busconfig>
+    EOF
+    cat > $out/share/dbus-1/system-services/org.freedesktop.PackageKit.service << 'EOF'
+    [D-BUS Service]
+    Name=org.freedesktop.PackageKit
+    Exec=/bin/false
+    User=root
+    SystemdService=packagekit.service
+    EOF
+  '';
+
+  # 9. Dérivation du plugin Frontend Cockpit (PatternFly 6 exact extrait de pkgs.cockpit)
+  # Complète les briques natives Cockpit avec uniquement 2 onglets dédiés : Paquets & Générations
   cockpitNixosPlugin = pkgs.runCommand "cockpit-nixos-plugin" {
     nativeBuildInputs = [ pkgs.gzip ];
   } ''
@@ -81,12 +147,10 @@ let
     cp ${../plugin/manifest.json}    $out/share/cockpit/nixos-manager/manifest.json
     cp ${../plugin/generations.html} $out/share/cockpit/nixos-manager/generations.html
     cp ${../plugin/packages.html}    $out/share/cockpit/nixos-manager/packages.html
-    cp ${../plugin/config.html}      $out/share/cockpit/nixos-manager/config.html
     cp ${../plugin/style.css}        $out/share/cockpit/nixos-manager/style.css
     cp ${../plugin/app.js}           $out/share/cockpit/nixos-manager/app.js
 
     # Extrait la feuille PatternFly 6 compilée exacte de la version de Cockpit installée
-    # (network.css inclut Page, Card, Table, Form, Select, Checkbox, Button, Label, Alert, List)
     touch $out/share/cockpit/nixos-manager/cockpit-patternfly.css
     for candidate in \
       "${pkgs.cockpit}/share/cockpit/network/network.css" \
@@ -147,7 +211,7 @@ let
 in
 {
   options.services.cockpit-nixos = {
-    enable = lib.mkEnableOption "Plugin déclaratif Cockpit pour NixOS (réseau, pare-feu, paquets, générations, montages)";
+    enable = lib.mkEnableOption "Intégration native et déclarative complète de Cockpit pour NixOS";
 
     port = lib.mkOption {
       type = lib.types.port;
@@ -158,7 +222,7 @@ in
     allowedOrigins = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
-      description = "Origines supplémentaires autorisées dans /etc/cockpit/cockpit.conf (WebService.Origins). Laisser vide pour autoriser automatiquement toutes les IP/hostnames locaux.";
+      description = "Origines supplémentaires autorisées dans /etc/cockpit/cockpit.conf (WebService.Origins).";
     };
 
     enableMachines = lib.mkOption {
@@ -176,19 +240,31 @@ in
     enableFiles = lib.mkOption {
       type = lib.types.bool;
       default = true;
-      description = "Active cockpit-files + udisks2 + dossiers montés (/srv/data, /mnt).";
+      description = "Active l'onglet natif Stockage (cockpit-storaged + udisks2 + outils disques/FS) et cockpit-files.";
+    };
+
+    enableStorageInterception = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Intercepte les montages Stockage (cockpit-storaged/udisks2/fstab) vers /etc/nixos/cockpit-managed.nix.";
     };
 
     enableNetworkInterception = lib.mkOption {
       type = lib.types.bool;
       default = true;
-      description = "Intercepte les modifications NetworkManager pour les écrire dans /etc/nixos/cockpit-managed.nix.";
+      description = "Intercepte les modifications NetworkManager (onglet Réseau natif) vers /etc/nixos/cockpit-managed.nix.";
     };
 
     enableFirewallBridge = lib.mkOption {
       type = lib.types.bool;
       default = true;
-      description = "Active le bridge D-Bus org.fedoraproject.FirewallD1 -> networking.firewall.";
+      description = "Active le bridge D-Bus org.fedoraproject.FirewallD1 -> networking.firewall (onglet Pare-feu natif).";
+    };
+
+    enablePackageKitBridge = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Active le bridge D-Bus org.freedesktop.PackageKit -> NixOS (onglet natif Mises à jour logicielles).";
     };
 
     enableAutoUpgrade = lib.mkOption {
@@ -228,297 +304,368 @@ in
   config = lib.mkIf cfg.enable (lib.mkMerge [
     {
       # -------------------------------------------------------------------------
-      # 1. Service Cockpit & découverte des plugins dans /share/cockpit
+      # 1. Service Cockpit & découverte native des modules (Software Updates, Storage, etc.)
       # -------------------------------------------------------------------------
-    services.cockpit = {
-      enable = true;
-      port = cfg.port;
-      openFirewall = true;
-      settings = {
-        WebService = {
-          AllowUnencrypted = false;
+      services.cockpit = {
+        enable = true;
+        port = cfg.port;
+        openFirewall = true;
+        settings = {
+          WebService = {
+            AllowUnencrypted = false;
+          };
         };
       };
-    };
 
-    # Expose /run/current-system/sw/share/cockpit pour tous les plugins
-    environment.pathsToLink = [ "/share/cockpit" ];
+      # Expose /share/cockpit et /share/dbus-1 pour les plugins et services D-Bus
+      environment.pathsToLink = [ "/share/cockpit" "/share/dbus-1" ];
 
-    # Masque l'onglet natif PackageKit (incompatible NixOS) via JSON Merge Patch officiel
-    environment.etc."cockpit/packagekit.override.json".text = builtins.toJSON {
-      menu = { updates = null; };
-      tools = { updates = null; };
-    };
+      # Active le VRAI onglet natif Mises à jour logicielles (PackageKit) via notre bridge D-Bus
+      # (ou le masque proprement si enablePackageKitBridge = false)
+      environment.etc."cockpit/packagekit.override.json".text = builtins.toJSON (
+        if cfg.enablePackageKitBridge then
+          { conditions = [ ]; }
+        else
+          { menu = { updates = null; }; tools = { updates = null; }; }
+      );
 
-    # -------------------------------------------------------------------------
-    # 2. Paquets de l'écosystème Cockpit + outils backend
-    # -------------------------------------------------------------------------
-    environment.systemPackages = with pkgs; [
-      cockpit
-      cockpitNixosPlugin
-      cockpitNixosCtl
-      cockpitNixosNetIntercept
-      nixosHealthChecker
-      acl
-      lm_sensors
-      lsof
-      jq
-    ]
-    ++ lib.optionals cfg.enableFiles (
-      lib.optional (pkgs ? cockpit-files) pkgs.cockpit-files
-      ++ [ udisks2 fuse3 nfs-utils cifs-utils ]
-    )
-    ++ lib.optionals cfg.enablePodman [
-      cockpit-podman
-      podman-compose
-      skopeo
-    ]
-    ++ lib.optionals cfg.enableMachines [
-      cockpit-machines
-      libvirt-dbus
-      virt-manager
-      virt-viewer
-      dnsmasq
-    ];
-
-    # -------------------------------------------------------------------------
-    # 3. Initialisation sûre de /etc/nixos/cockpit-managed.nix & dossiers Cockpit-Files
-    # -------------------------------------------------------------------------
-    system.activationScripts.initCockpitManaged = lib.stringAfter [ "etc" ] ''
-      mkdir -p /etc/nixos /var/lib/cockpit-nixos/backups /run/cockpit-nixos
-      if [ ! -f /etc/nixos/cockpit-managed.nix ]; then
-        printf '# Fichier initialisé automatiquement par cockpit-nixos\n{ config, pkgs, lib, ... }:\n{\n}\n' > /etc/nixos/cockpit-managed.nix
-        chmod 0644 /etc/nixos/cockpit-managed.nix
-      fi
-    '';
-
-    # Répertoires prêts pour Cockpit-Files, VMs & Health-Checker (permissions groupe wheel)
-    systemd.tmpfiles.rules = [
-      "d /var/lib/cockpit-nixos 0755 root wheel -"
-      "d /var/lib/cockpit-nixos/backups 0750 root wheel -"
-      "d /srv/data 2775 root wheel -"
-      "d /srv/shares 2775 root wheel -"
-      "d /mnt/storage 2775 root wheel -"
-    ] ++ lib.optionals cfg.enableMachines [
-      "d /var/lib/libvirt/images 2775 root libvirtd -"
-    ] ++ lib.optionals cfg.enableHealthChecker [
-      "d /var/lib/nixos-health-checker 0755 root root -"
-    ];
-
-    # Gestion des disques / montages amovibles pour Cockpit-Files & Storage
-    services.udisks2.enable = lib.mkDefault cfg.enableFiles;
-
-    # -------------------------------------------------------------------------
-    # 4. Réseau (NetworkManager) + Pare-feu natif NixOS
-    # -------------------------------------------------------------------------
-    networking.networkmanager.enable = lib.mkDefault true;
-    networking.firewall.enable = lib.mkDefault true;
-
-    # Watchers d'interception NetworkManager -> /etc/nixos/cockpit-managed.nix
-    systemd.paths.cockpit-nixos-net-intercept = lib.mkIf cfg.enableNetworkInterception {
-      description = "Surveille les modifications NetworkManager (Cockpit Networking)";
-      wantedBy = [ "multi-user.target" ];
-      pathConfig = {
-        PathChanged = "/etc/NetworkManager/system-connections";
-        Unit = "cockpit-nixos-net-intercept.service";
+      # Garantit la visibilité du VRAI onglet natif Stockage (cockpit-storaged / udisks2)
+      environment.etc."cockpit/storaged.override.json" = lib.mkIf cfg.enableFiles {
+        text = builtins.toJSON { conditions = [ ]; };
       };
-    };
 
-    systemd.services.cockpit-nixos-net-intercept = lib.mkIf cfg.enableNetworkInterception {
-      description = "Synchronise les profils NetworkManager modifiés vers /etc/nixos/cockpit-managed.nix";
-      after = [ "NetworkManager.service" ];
-      path = with pkgs; [ networkmanager nix nixos-rebuild coreutils systemd ];
-      serviceConfig = {
-        Type = "oneshot";
-        ExecStart = "${cockpitNixosNetIntercept}/bin/cockpit-nixos-net-intercept";
-      };
-    };
+      # Rend /etc/fstab éditable (copie mode 0644 au lieu d'un lien symbolique RO dans /nix/store)
+      # afin que cockpit-storaged/udisks2 puisse enregistrer les montages avant interception NixOS
+      environment.etc.fstab.mode = lib.mkIf cfg.enableStorageInterception (lib.mkDefault "0644");
 
-    # Bridge D-Bus org.fedoraproject.FirewallD1 -> networking.firewall (NixOS)
-    services.dbus.packages =
-      lib.optional cfg.enableFirewallBridge firewallBridgeDbusPolicy
-      ++ lib.optional cfg.enableMachines pkgs.libvirt-dbus;
-
-    systemd.services.cockpit-nixos-firewall-bridge = lib.mkIf cfg.enableFirewallBridge {
-      description = "Bridge déclaratif D-Bus FirewallD1 -> NixOS networking.firewall";
-      after = [ "dbus.service" "network.target" ];
-      wantedBy = [ "multi-user.target" ];
-      aliases = [ "firewalld.service" ];
-      path = with pkgs; [ nix nixos-rebuild coreutils systemd ];
-      environment = {
-        GI_TYPELIB_PATH = lib.makeSearchPath "lib/girepository-1.0" [
-          pkgs.glib.out
-          pkgs.gobject-introspection
-        ];
-      };
-      serviceConfig = {
-        Type = "simple";
-        ExecStart = "${cockpitNixosFirewallBridge}/bin/cockpit-nixos-firewall-bridge";
-        Restart = "on-failure";
-        RestartSec = "3s";
-      };
-    };
-
-    # -------------------------------------------------------------------------
-    # 5. Virtualisation KVM/Libvirt (cockpit-machines) & Podman (cockpit-podman)
-    # -------------------------------------------------------------------------
-    virtualisation.libvirtd = lib.mkIf cfg.enableMachines {
-      enable = true;
-      qemu = {
-        package = pkgs.qemu_kvm;
-        runAsRoot = true;
-        swtpm.enable = true;
-      };
-    };
-
-    virtualisation.podman = lib.mkIf cfg.enablePodman {
-      enable = true;
-      dockerCompat = true;
-      dockerSocket.enable = true;
-      defaultNetwork.settings.dns_enabled = true;
-      autoPrune = {
-        enable = true;
-        dates = "weekly";
-      };
-    };
-
-    # -------------------------------------------------------------------------
-    # 6. Sécurité : Règles Polkit & Sudo calibrées au moindre privilège
-    # -------------------------------------------------------------------------
-    security.polkit.enable = true;
-    security.polkit.extraConfig = ''
-      polkit.addRule(function(action, subject) {
-        if (!subject.isInGroup("wheel")) {
-          return polkit.Result.NOT_HANDLED;
-        }
-        var allowedPrefixes = [
-          "org.freedesktop.systemd1.manage-units",
-          "org.freedesktop.NetworkManager.",
-          "org.freedesktop.udisks2.",
-          "org.libvirt.unix.manage",
-          "org.fedoraproject.FirewallD1."
-        ];
-        for (var i = 0; i < allowedPrefixes.length; i++) {
-          if (action.id.indexOf(allowedPrefixes[i]) === 0) {
-            return polkit.Result.YES;
-          }
-        }
-      });
-    '';
-
-    # Sudo : NOPASSWD uniquement sur le binaire immuable cockpit-nixos-ctl (dans le Nix store)
-    security.sudo.enable = true;
-    security.sudo.extraRules = [
-      {
-        groups = [ "wheel" ];
-        commands = [
-          {
-            command = "${cockpitNixosCtl}/bin/cockpit-nixos-ctl";
-            options = [ "NOPASSWD" "NOSETENV" ];
-          }
-          {
-            command = "/run/current-system/sw/bin/cockpit-nixos-ctl";
-            options = [ "NOPASSWD" "NOSETENV" ];
-          }
-        ];
-      }
-    ];
-
-    # -------------------------------------------------------------------------
-    # 7. Mises à jour automatiques + Health-Checker & Auto-Rollback (style MicroOS)
-    # -------------------------------------------------------------------------
-    system.autoUpgrade = lib.mkIf cfg.enableAutoUpgrade {
-      enable = true;
-      dates = cfg.autoUpgradeDates;
-      randomizedDelaySec = "30min";
-      allowReboot = true;
-      rebootWindow = cfg.autoUpgradeRebootWindow;
-      persistent = true;
-    };
-
-    # Nettoyage périodique prudent (conserve les 14 derniers jours pour les rollbacks)
-    nix.gc = lib.mkIf cfg.enableAutoUpgrade {
-      automatic = lib.mkDefault true;
-      dates = lib.mkDefault "weekly";
-      options = lib.mkDefault "--delete-older-than 14d";
-    };
-
-    # Kernel panic -> redémarrage automatique au bout de 10s (permet au boot counter de compter)
-    boot.kernelParams = lib.optionals cfg.enableHealthChecker [ "panic=10" "oops=panic" ];
-
-    # Phase 1 (précoce) : compteur de démarrages résistant aux boot-loops/crashes
-    systemd.services.nixos-boot-counter = lib.mkIf cfg.enableHealthChecker {
-      description = "Compteur précoce de démarrages NixOS (anti boot-loop style MicroOS)";
-      wantedBy = [ "sysinit.target" ];
-      after = [ "local-fs.target" ];
-      before = [ "basic.target" "network-pre.target" "nixos-health-checker.service" ];
-      unitConfig.DefaultDependencies = false;
-      path = with pkgs; [ nix nixos-rebuild coreutils systemd ];
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-        ExecStart = "${nixosHealthChecker}/bin/nixos-health-checker --boot-counter --max-attempts ${toString cfg.maxBootAttempts} --cockpit-port ${toString cfg.port}";
-      };
-    };
-
-    # Phase 2 (boot-complete.target) : sondes système + bénédiction ou rollback automatique
-    systemd.services.nixos-health-checker = lib.mkIf cfg.enableHealthChecker {
-      description = "Vérification de santé système NixOS (style openSUSE MicroOS health-checker)";
-      after = [ "nixos-boot-counter.service" "network-online.target" "dbus.service" "cockpit.socket" ]
-        ++ lib.optional cfg.enablePodman "podman.socket"
-        ++ lib.optional cfg.enableMachines "libvirtd.service";
-      wants = [ "network-online.target" ];
-      before = [ "boot-complete.target" ];
-      wantedBy = [ "multi-user.target" ];
-      requiredBy = [ "boot-complete.target" ];
-      path = with pkgs; [ nix nixos-rebuild iproute2 coreutils systemd ];
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-        ExecStart = "${nixosHealthChecker}/bin/nixos-health-checker --verify --max-attempts ${toString cfg.maxBootAttempts} --cockpit-port ${toString cfg.port}";
-      };
-    };
-
-    # Phase 3 (post-upgrade à chaud sans reboot) : vérifie les services et rollback live si cassé
-    systemd.services.nixos-upgrade = lib.mkIf (cfg.enableAutoUpgrade && cfg.enableHealthChecker) {
-      path = [ pkgs.iproute2 ];
-      serviceConfig.ExecStartPost = [
-        "${nixosHealthChecker}/bin/nixos-health-checker --live-check --cockpit-port ${toString cfg.port}"
+      # -------------------------------------------------------------------------
+      # 2. Paquets de l'écosystème Cockpit + outils Stockage/Disques + backend
+      # -------------------------------------------------------------------------
+      environment.systemPackages = with pkgs; [
+        cockpit
+        cockpitNixosPlugin
+        cockpitNixosCtl
+        cockpitNixosNetIntercept
+        cockpitNixosStorageIntercept
+        nixosHealthChecker
+        acl
+        lm_sensors
+        lsof
+        jq
+      ]
+      ++ lib.optional cfg.enableFirewallBridge firewallBridgeDbusPackage
+      ++ lib.optional cfg.enablePackageKitBridge packageKitBridgeDbusPackage
+      ++ lib.optionals cfg.enableFiles (
+        lib.optional (pkgs ? cockpit-files) pkgs.cockpit-files
+        ++ [
+          udisks2
+          smartmontools
+          parted
+          e2fsprogs
+          btrfs-progs
+          xfsprogs
+          dosfstools
+          ntfs3g
+          cryptsetup
+          lvm2
+          mdadm
+          util-linux
+          fuse3
+          nfs-utils
+          cifs-utils
+        ]
+      )
+      ++ lib.optionals cfg.enablePodman [
+        cockpit-podman
+        podman-compose
+        skopeo
+      ]
+      ++ lib.optionals cfg.enableMachines [
+        cockpit-machines
+        libvirt-dbus
+        virt-manager
+        virt-viewer
+        dnsmasq
       ];
-    };
-  }
 
-  # Enregistrement natif des plugins Cockpit (NixOS 25.11+/unstable)
-  (lib.optionalAttrs (options.services.cockpit ? plugins) {
-    services.cockpit.plugins = cockpitPluginPackages;
-  })
+      # -------------------------------------------------------------------------
+      # 3. Initialisation sûre de /etc/nixos/cockpit-managed.nix & Stockage natif
+      # -------------------------------------------------------------------------
+      system.activationScripts.initCockpitManaged = lib.stringAfter [ "etc" ] ''
+        mkdir -p /etc/nixos /var/lib/cockpit-nixos/backups /run/cockpit-nixos
+        if [ ! -f /etc/nixos/cockpit-managed.nix ]; then
+          printf '# Fichier initialisé automatiquement par cockpit-nixos\n{ config, pkgs, lib, ... }:\n{\n}\n' > /etc/nixos/cockpit-managed.nix
+          chmod 0644 /etc/nixos/cockpit-managed.nix
+        fi
+      '';
 
-  # Origines autorisées (corrige nixpkgs#453337 : tunnel SSH http://localhost, 127.0.0.1, LAN, .local)
-  (if (options.services.cockpit ? allowed-origins) then {
-    services.cockpit.allowed-origins = defaultAllowedOrigins;
-  } else {
-    services.cockpit.settings.WebService.Origins = lib.mkForce (lib.concatStringsSep " " defaultAllowedOrigins);
-  })
+      # Répertoires prêts pour Cockpit-Files, Stockage, VMs & Health-Checker
+      systemd.tmpfiles.rules = [
+        "d /var/lib/cockpit-nixos 0755 root wheel -"
+        "d /var/lib/cockpit-nixos/backups 0750 root wheel -"
+        "d /srv/data 2775 root wheel -"
+        "d /srv/shares 2775 root wheel -"
+        "d /mnt/storage 2775 root wheel -"
+      ] ++ lib.optionals cfg.enableMachines [
+        "d /var/lib/libvirt/images 2775 root libvirtd -"
+      ] ++ lib.optionals cfg.enableHealthChecker [
+        "d /var/lib/nixos-health-checker 0755 root root -"
+      ];
 
-  # Watchdog matériel systemd (compatible NixOS 25.05+/unstable et fallback 24.11)
-  (if (options.systemd ? settings && options.systemd.settings ? Manager) then {
-    systemd.settings.Manager = lib.mkIf cfg.enableHealthChecker {
-      RuntimeWatchdogSec = lib.mkDefault "30s";
-      RebootWatchdogSec = lib.mkDefault "2min";
-    };
-  } else {
-    systemd.watchdog = lib.mkIf cfg.enableHealthChecker {
-      runtimeTime = lib.mkDefault "30s";
-      rebootTime = lib.mkDefault "2min";
-    };
-  })
+      # UDisks2 + SMART + support NTFS pour le VRAI onglet natif Stockage (cockpit-storaged)
+      services.udisks2.enable = lib.mkDefault cfg.enableFiles;
+      services.smartd.enable = lib.mkDefault cfg.enableFiles;
+      boot.supportedFilesystems = lib.optionals cfg.enableFiles [ "ntfs" ];
 
-  # Automatic Boot Assessment natif systemd-boot (boot counting +3 + systemd-bless-boot) si disponible dans nixpkgs
-  (lib.optionalAttrs (options.boot.loader.systemd-boot ? bootCounting) {
-    boot.loader.systemd-boot.bootCounting = lib.mkIf (cfg.enableHealthChecker && config.boot.loader.systemd-boot.enable) {
-      enable = true;
-      tries = cfg.maxBootAttempts;
-    };
-  })
+      # Intercepteur déclaratif Stockage/UDisks2/fstab -> /etc/nixos/cockpit-managed.nix
+      systemd.services.cockpit-nixos-storage-intercept = lib.mkIf cfg.enableStorageInterception {
+        description = "Synchronise les montages Stockage Cockpit (udisks2/fstab) vers /etc/nixos/cockpit-managed.nix";
+        after = [ "local-fs.target" "udisks2.service" ];
+        wantedBy = [ "multi-user.target" ];
+        path = with pkgs; [ util-linux nix nixos-rebuild coreutils systemd ];
+        serviceConfig = {
+          Type = "simple";
+          ExecStart = "${cockpitNixosStorageIntercept}/bin/cockpit-nixos-storage-intercept";
+          Restart = "on-failure";
+          RestartSec = "3s";
+        };
+      };
+
+      # -------------------------------------------------------------------------
+      # 4. Réseau (NetworkManager), Pare-feu (FirewallD1) & Mises à jour (PackageKit)
+      # -------------------------------------------------------------------------
+      networking.networkmanager.enable = lib.mkDefault true;
+      networking.firewall.enable = lib.mkDefault true;
+
+      # Watchers d'interception NetworkManager -> /etc/nixos/cockpit-managed.nix
+      systemd.paths.cockpit-nixos-net-intercept = lib.mkIf cfg.enableNetworkInterception {
+        description = "Surveille les modifications NetworkManager (Cockpit Networking)";
+        wantedBy = [ "multi-user.target" ];
+        pathConfig = {
+          PathChanged = "/etc/NetworkManager/system-connections";
+          Unit = "cockpit-nixos-net-intercept.service";
+        };
+      };
+
+      systemd.services.cockpit-nixos-net-intercept = lib.mkIf cfg.enableNetworkInterception {
+        description = "Synchronise les profils NetworkManager modifiés vers /etc/nixos/cockpit-managed.nix";
+        after = [ "NetworkManager.service" ];
+        path = with pkgs; [ networkmanager nix nixos-rebuild coreutils systemd ];
+        serviceConfig = {
+          Type = "oneshot";
+          ExecStart = "${cockpitNixosNetIntercept}/bin/cockpit-nixos-net-intercept";
+        };
+      };
+
+      # Enregistrement D-Bus des bridges déclaratifs FirewallD1, PackageKit et libvirt-dbus
+      services.dbus.packages =
+        lib.optional cfg.enableFirewallBridge firewallBridgeDbusPackage
+        ++ lib.optional cfg.enablePackageKitBridge packageKitBridgeDbusPackage
+        ++ lib.optional cfg.enableMachines pkgs.libvirt-dbus;
+
+      # Bridge D-Bus org.fedoraproject.FirewallD1 -> networking.firewall (NixOS)
+      systemd.services.cockpit-nixos-firewall-bridge = lib.mkIf cfg.enableFirewallBridge {
+        description = "Bridge déclaratif D-Bus FirewallD1 -> NixOS networking.firewall";
+        after = [ "dbus.service" "network.target" ];
+        wantedBy = [ "multi-user.target" ];
+        aliases = [ "firewalld.service" ];
+        path = with pkgs; [ nix nixos-rebuild coreutils systemd ];
+        environment = {
+          GI_TYPELIB_PATH = lib.makeSearchPath "lib/girepository-1.0" [
+            pkgs.glib.out
+            pkgs.gobject-introspection
+          ];
+        };
+        serviceConfig = {
+          Type = "simple";
+          ExecStart = "${cockpitNixosFirewallBridge}/bin/cockpit-nixos-firewall-bridge";
+          Restart = "on-failure";
+          RestartSec = "3s";
+        };
+      };
+
+      # Bridge D-Bus org.freedesktop.PackageKit -> Mises à jour & paquets déclaratifs NixOS
+      systemd.services.cockpit-nixos-packagekit-bridge = lib.mkIf cfg.enablePackageKitBridge {
+        description = "Bridge déclaratif D-Bus PackageKit -> Mises à jour & paquets NixOS";
+        after = [ "dbus.service" "network.target" ];
+        wantedBy = [ "multi-user.target" ];
+        aliases = [ "packagekit.service" ];
+        path = with pkgs; [ nix nixos-rebuild coreutils systemd ];
+        environment = {
+          GI_TYPELIB_PATH = lib.makeSearchPath "lib/girepository-1.0" [
+            pkgs.glib.out
+            pkgs.gobject-introspection
+          ];
+        };
+        serviceConfig = {
+          Type = "simple";
+          ExecStart = "${cockpitNixosPackageKitBridge}/bin/cockpit-nixos-packagekit-bridge";
+          Restart = "on-failure";
+          RestartSec = "3s";
+        };
+      };
+
+      # -------------------------------------------------------------------------
+      # 5. Virtualisation KVM/Libvirt (cockpit-machines) & Podman (cockpit-podman)
+      # -------------------------------------------------------------------------
+      virtualisation.libvirtd = lib.mkIf cfg.enableMachines {
+        enable = true;
+        qemu = {
+          package = pkgs.qemu_kvm;
+          runAsRoot = true;
+          swtpm.enable = true;
+        };
+      };
+
+      virtualisation.podman = lib.mkIf cfg.enablePodman {
+        enable = true;
+        dockerCompat = true;
+        dockerSocket.enable = true;
+        defaultNetwork.settings.dns_enabled = true;
+        autoPrune = {
+          enable = true;
+          dates = "weekly";
+        };
+      };
+
+      # -------------------------------------------------------------------------
+      # 6. Sécurité : Règles Polkit & Sudo calibrées au moindre privilège
+      # -------------------------------------------------------------------------
+      security.polkit.enable = true;
+      security.polkit.extraConfig = ''
+        polkit.addRule(function(action, subject) {
+          if (!subject.isInGroup("wheel")) {
+            return polkit.Result.NOT_HANDLED;
+          }
+          var allowedPrefixes = [
+            "org.freedesktop.systemd1.manage-units",
+            "org.freedesktop.NetworkManager.",
+            "org.freedesktop.udisks2.",
+            "org.libvirt.unix.manage",
+            "org.fedoraproject.FirewallD1.",
+            "org.freedesktop.PackageKit."
+          ];
+          for (var i = 0; i < allowedPrefixes.length; i++) {
+            if (action.id.indexOf(allowedPrefixes[i]) === 0) {
+              return polkit.Result.YES;
+            }
+          }
+        });
+      '';
+
+      # Sudo : NOPASSWD uniquement sur le binaire immuable cockpit-nixos-ctl (dans le Nix store)
+      security.sudo.enable = true;
+      security.sudo.extraRules = [
+        {
+          groups = [ "wheel" ];
+          commands = [
+            {
+              command = "${cockpitNixosCtl}/bin/cockpit-nixos-ctl";
+              options = [ "NOPASSWD" "NOSETENV" ];
+            }
+            {
+              command = "/run/current-system/sw/bin/cockpit-nixos-ctl";
+              options = [ "NOPASSWD" "NOSETENV" ];
+            }
+          ];
+        }
+      ];
+
+      # -------------------------------------------------------------------------
+      # 7. Mises à jour automatiques + Health-Checker & Auto-Rollback (style MicroOS)
+      # -------------------------------------------------------------------------
+      system.autoUpgrade = lib.mkIf cfg.enableAutoUpgrade {
+        enable = true;
+        dates = cfg.autoUpgradeDates;
+        randomizedDelaySec = "30min";
+        allowReboot = true;
+        rebootWindow = cfg.autoUpgradeRebootWindow;
+        persistent = true;
+      };
+
+      # Nettoyage périodique prudent (conserve les 14 derniers jours pour les rollbacks)
+      nix.gc = lib.mkIf cfg.enableAutoUpgrade {
+        automatic = lib.mkDefault true;
+        dates = lib.mkDefault "weekly";
+        options = lib.mkDefault "--delete-older-than 14d";
+      };
+
+      # Kernel panic -> redémarrage automatique au bout de 10s (permet au boot counter de compter)
+      boot.kernelParams = lib.optionals cfg.enableHealthChecker [ "panic=10" "oops=panic" ];
+
+      # Phase 1 (précoce) : compteur de démarrages résistant aux boot-loops/crashes
+      systemd.services.nixos-boot-counter = lib.mkIf cfg.enableHealthChecker {
+        description = "Compteur précoce de démarrages NixOS (anti boot-loop style MicroOS)";
+        wantedBy = [ "sysinit.target" ];
+        after = [ "local-fs.target" ];
+        before = [ "basic.target" "network-pre.target" "nixos-health-checker.service" ];
+        unitConfig.DefaultDependencies = false;
+        path = with pkgs; [ nix nixos-rebuild coreutils systemd ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = "${nixosHealthChecker}/bin/nixos-health-checker --boot-counter --max-attempts ${toString cfg.maxBootAttempts} --cockpit-port ${toString cfg.port}";
+        };
+      };
+
+      # Phase 2 (boot-complete.target) : sondes système + bénédiction ou rollback automatique
+      systemd.services.nixos-health-checker = lib.mkIf cfg.enableHealthChecker {
+        description = "Vérification de santé système NixOS (style openSUSE MicroOS health-checker)";
+        after = [ "nixos-boot-counter.service" "network-online.target" "dbus.service" "cockpit.socket" ]
+          ++ lib.optional cfg.enablePodman "podman.socket"
+          ++ lib.optional cfg.enableMachines "libvirtd.service";
+        wants = [ "network-online.target" ];
+        before = [ "boot-complete.target" ];
+        wantedBy = [ "multi-user.target" ];
+        requiredBy = [ "boot-complete.target" ];
+        path = with pkgs; [ nix nixos-rebuild iproute2 coreutils systemd ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = "${nixosHealthChecker}/bin/nixos-health-checker --verify --max-attempts ${toString cfg.maxBootAttempts} --cockpit-port ${toString cfg.port}";
+        };
+      };
+
+      # Phase 3 (post-upgrade à chaud sans reboot) : vérifie les services et rollback live si cassé
+      systemd.services.nixos-upgrade = lib.mkIf (cfg.enableAutoUpgrade && cfg.enableHealthChecker) {
+        path = [ pkgs.iproute2 ];
+        serviceConfig.ExecStartPost = [
+          "${nixosHealthChecker}/bin/nixos-health-checker --live-check --cockpit-port ${toString cfg.port}"
+        ];
+      };
+    }
+
+    # Enregistrement natif des plugins Cockpit (NixOS 25.11+/unstable)
+    (lib.optionalAttrs (options.services.cockpit ? plugins) {
+      services.cockpit.plugins = cockpitPluginPackages;
+    })
+
+    # Origines autorisées (corrige nixpkgs#453337 : tunnel SSH http://localhost, 127.0.0.1, LAN, .local)
+    (if (options.services.cockpit ? allowed-origins) then {
+      services.cockpit.allowed-origins = defaultAllowedOrigins;
+    } else {
+      services.cockpit.settings.WebService.Origins = lib.mkForce (lib.concatStringsSep " " defaultAllowedOrigins);
+    })
+
+    # Watchdog matériel systemd (compatible NixOS 25.05+/unstable et fallback 24.11)
+    (if (options.systemd ? settings && options.systemd.settings ? Manager) then {
+      systemd.settings.Manager = lib.mkIf cfg.enableHealthChecker {
+        RuntimeWatchdogSec = lib.mkDefault "30s";
+        RebootWatchdogSec = lib.mkDefault "2min";
+      };
+    } else {
+      systemd.watchdog = lib.mkIf cfg.enableHealthChecker {
+        runtimeTime = lib.mkDefault "30s";
+        rebootTime = lib.mkDefault "2min";
+      };
+    })
+
+    # Automatic Boot Assessment natif systemd-boot (boot counting +3 + systemd-bless-boot) si disponible dans nixpkgs
+    (lib.optionalAttrs (options.boot.loader.systemd-boot ? bootCounting) {
+      boot.loader.systemd-boot.bootCounting = lib.mkIf (cfg.enableHealthChecker && config.boot.loader.systemd-boot.enable) {
+        enable = true;
+        tries = cfg.maxBootAttempts;
+      };
+    })
   ]);
 }

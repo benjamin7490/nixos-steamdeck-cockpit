@@ -121,6 +121,24 @@
           </div>
 
           <div class="pf-v6-c-card">
+            <div class="pf-v6-c-card__body">
+              <details class="nixos-details">
+                <summary class="nixos-details-summary">
+                  <span class="pf-v6-c-title pf-m-md">État déclaratif généré : <code>/etc/nixos/cockpit-managed.nix</code></span>
+                </summary>
+                <div class="nixos-stack nixos-details-body">
+                  <div class="nixos-actions">
+                    <button id="btn-reload-nix" class="pf-v6-c-button pf-m-secondary pf-m-small" type="button">Recharger</button>
+                    <button id="btn-dry-build" class="pf-v6-c-button pf-m-secondary pf-m-small" type="button">Dry-Build</button>
+                    <button id="btn-rebuild-now" class="pf-v6-c-button pf-m-primary pf-m-small" type="button">Rebuild &amp; Switch</button>
+                  </div>
+                  <pre id="nix-preview" class="nixos-code-preview">Chargement...</pre>
+                </div>
+              </details>
+            </div>
+          </div>
+
+          <div class="pf-v6-c-card">
             <div class="pf-v6-c-card__header">
               <div class="pf-v6-c-card__title">
                 <h2 class="pf-v6-c-title pf-m-md">Journal d'exécution temps réel</h2>

@@ -31,7 +31,7 @@ PKG_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._+-]*(?:\.[a-zA-Z0-9][a-zA-Z0-9._+-
 HOST_RE = re.compile(r"^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$")
 IFACE_RE = re.compile(r"^[a-zA-Z0-9_.:-]{1,15}$")
 OPT_RE = re.compile(r"^[a-zA-Z0-9_=,./:@-]+$")
-DEV_RE = re.compile(r"^[a-zA-Z0-9_./:@-]+$")
+DEV_RE = re.compile(r"^[a-zA-Z0-9_./:@=+-]+$")
 NM_KEY_RE = re.compile(r"^[a-zA-Z0-9._ -]{1,64}$")
 
 ALLOWED_FSTYPES = {"ext4", "xfs", "btrfs", "vfat", "ntfs", "nfs", "nfs4", "cifs", "tmpfs", "none", "auto"}
@@ -166,11 +166,11 @@ def render_managed_nix(state: dict) -> str:
         for m in mounts:
             mp = m["mountPoint"]
             lines.append("    " + nix_str(mp) + " = {")
-            lines.append("      device = " + nix_str(m["device"]) + ";")
-            lines.append("      fsType = " + nix_str(m["fsType"]) + ";")
+            lines.append("      device = lib.mkDefault " + nix_str(m["device"]) + ";")
+            lines.append("      fsType = lib.mkDefault " + nix_str(m["fsType"]) + ";")
             opts = m.get("options", [])
             if opts:
-                lines.append("      options = [ " + " ".join(nix_str(o) for o in opts) + " ];")
+                lines.append("      options = lib.mkDefault [ " + " ".join(nix_str(o) for o in opts) + " ];")
             lines.append("    };")
         lines.append("  };")
 
@@ -730,6 +730,24 @@ def main() -> int:
             mp = os.path.normpath(sys.argv[2].strip())
             state = load_state()
             state["mounts"] = [m for m in state["mounts"] if m["mountPoint"] != mp]
+            apply_state_transactional(state, mode="switch")
+            return 0
+
+        if cmd == "mounts-sync" and len(sys.argv) >= 3:
+            ensure_root()
+            raw_list = json.loads(sys.argv[2])
+            if not isinstance(raw_list, list):
+                raise ValueError("mounts-sync attend une liste JSON.")
+            sync_prefixes = ("/mnt/", "/srv/", "/media/", "/data/")
+            synced = [validate_mount(item) for item in raw_list]
+            synced = [m for m in synced if m["mountPoint"].startswith(sync_prefixes)]
+            state = load_state()
+            preserved = [m for m in state.get("mounts", []) if not m.get("mountPoint", "").startswith(sync_prefixes)]
+            merged = sorted(preserved + synced, key=lambda m: m["mountPoint"])
+            current_sorted = sorted(state.get("mounts", []), key=lambda m: m.get("mountPoint", ""))
+            if json.dumps(merged, sort_keys=True) == json.dumps(current_sorted, sort_keys=True):
+                return 0
+            state["mounts"] = merged
             apply_state_transactional(state, mode="switch")
             return 0
 

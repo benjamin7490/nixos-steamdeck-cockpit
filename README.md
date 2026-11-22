@@ -1,28 +1,26 @@
 # nixos-steamdeck-cockpit
 
 ![NixOS](https://img.shields.io/badge/NixOS-unstable%20%7C%2025.05%2B-5277C3?logo=nixos&logoColor=white)
-![Cockpit](https://img.shields.io/badge/Cockpit-Declarative%20Bridge-0066CC)
+![Cockpit](https://img.shields.io/badge/Cockpit-Native%20Declarative%20Bridge-0066CC)
 ![Podman](https://img.shields.io/badge/Podman-Ready-892CA0?logo=podman&logoColor=white)
 ![KVM / Libvirt](https://img.shields.io/badge/KVM%20%2F%20Libvirt-cockpit--machines-orange)
 ![Steam Deck](https://img.shields.io/badge/Steam%20Deck-Jovian--NixOS-1A9FFF?logo=steam&logoColor=white)
 
-A NixOS module and **Cockpit** plugin that bring the full Cockpit ecosystem (`cockpit-machines`, `cockpit-files`, `cockpit-podman`, networking, firewall, packages, and generations) to NixOS **natively and declaratively**, paired with an **openSUSE MicroOS–style boot health checker with automatic rollback** and a turnkey headless server profile for the **Steam Deck** (or any NixOS server).
+A NixOS module and **Cockpit** integration that make Cockpit's **real built-in modules** (**Software Updates**, **Storage**, **Networking & Firewall**, **Podman**, **Virtual Machines**, and **Files**) work **natively and declaratively** on NixOS by bridging every UI action into `/etc/nixos/cockpit-managed.nix` — paired with an **openSUSE MicroOS–style boot health checker with automatic rollback** and a turnkey headless server profile for the **Steam Deck** (or any NixOS server).
 
 ---
 
 ## Features
 
-- **Native Cockpit Integration (PatternFly 6 + separate sidebar tabs)** — reuses Cockpit's own compiled PatternFly 6 CSS (including live Light/Dark theme sync) and existing Cockpit modules:
-  - **Générations NixOS**: list NixOS generations, switch generations atomically, **Roll back** with one click, run **`nix-collect-garbage -d`**, optimize the Nix store, monitor the **MicroOS-style Health-Checker**, and view live **`hwmon` hardware telemetry** (Steam Deck fan RPM & APU temperature).
-  - **Paquets NixOS**: replaces the incompatible `PackageKit` tab (hidden via `override.json`) with declarative `nixpkgs` search and `environment.systemPackages` management.
-  - **Configuration NixOS**: manages declarative `fileSystems` mounts (linked directly to Cockpit's native **Files** and **Storage** modules), hostname/DNS/trusted interfaces, live preview of `/etc/nixos/cockpit-managed.nix`, and direct links to Cockpit's native **Networking & Firewall** module.
-- **Declarative Interception into `/etc/nixos/cockpit-managed.nix`** using Cockpit's existing native modules:
-  - **Networking** (native Cockpit *Networking* tab): watches `NetworkManager` profile changes and syncs them into `networking.networkmanager.ensureProfiles.profiles` (3 s debounce, SHA-256 anti-loop guard, ephemeral Podman/Libvirt/veth filtering).
-  - **Firewall** (native Cockpit *Networking → Firewall* UI): registers a full `org.fedoraproject.FirewallD1` D-Bus bridge (aliased as `firewalld.service`) that translates every Cockpit Firewall UI action directly into NixOS's native `networking.firewall` without running imperative `firewalld`.
-- **Full Virtualization, Containers & Storage Stack**:
-  - **Podman** (`cockpit-podman`, `dockerCompat`, `dockerSocket`, internal DNS, `podman-compose`, weekly `autoPrune`).
-  - **KVM / QEMU** (`cockpit-machines`, `libvirtd`, `libvirt-dbus`, `virt-manager`, `swtpm`).
-  - **Files & Disks** (`cockpit-files`, `udisks2`, pre-configured `/srv/data`, `/srv/shares`, `/mnt/storage` directories).
+- **Real Native Cockpit Modules — Adapted Declaratively to NixOS**:
+  - **Software Updates (`pkg/packagekit`)**: powered by a full `org.freedesktop.PackageKit` D-Bus bridge (aliased as `packagekit.service`). Checking for updates runs `nix-channel --update` + `nix store diff-closures`, applying updates runs `nixos-rebuild switch --upgrade` (detecting kernel restarts), and PackageKit install/remove transactions route into `/etc/nixos/cockpit-managed.nix`.
+  - **Storage (`pkg/storaged` / `udisks2`)**: enables `udisks2`, `smartd`, and the full disk/filesystem toolset (`parted`, `e2fsprogs`, `btrfs-progs`, `xfsprogs`, `dosfstools`, `ntfs3g`, `cryptsetup`, `lvm2`, `mdadm`, `nfs-utils`, `cifs-utils`). Keeps `/etc/fstab` writable (`mode = "0644"`) for `cockpit-storaged` and intercepts mounts under `/mnt/`, `/srv/`, `/media/`, and `/data/` into declarative `fileSystems` entries in `/etc/nixos/cockpit-managed.nix` (preserving static NixOS mounts).
+  - **Networking (`pkg/networkmanager`)**: watches `NetworkManager` profile edits and syncs them into `networking.networkmanager.ensureProfiles.profiles` (3 s debounce, SHA-256 anti-loop guard, ephemeral Podman/Libvirt/veth filtering).
+  - **Firewall (native *Networking → Firewall* UI)**: registers a full `org.fedoraproject.FirewallD1` D-Bus bridge (aliased as `firewalld.service`) translating Cockpit's Firewall UI directly into NixOS's native `networking.firewall` without running imperative `firewalld`.
+  - **Podman, KVM & Files**: turnkey `cockpit-podman` (`dockerCompat`, `dockerSocket`, internal DNS, weekly `autoPrune`), `cockpit-machines` (`libvirtd`, `libvirt-dbus`, `virt-manager`, `swtpm`), and `cockpit-files` (`/srv/data`, `/srv/shares`, `/mnt/storage`).
+- **Two Thin Complementary Sidebar Tabs (Exact Cockpit PatternFly 6 CSS + Light/Dark Sync)**:
+  - **Paquets**: declarative `nixpkgs` search and `environment.systemPackages` add/remove UI complementing Cockpit's native *Software Updates* tab.
+  - **Générations**: NixOS equivalent of Fedora CoreOS's `cockpit-ostree` / openSUSE MicroOS's `cockpit-tukit` — list and switch NixOS generations atomically, **Roll back** with one click, run **`nix-collect-garbage -d`**, optimize the Nix store, inspect the **MicroOS-style Health-Checker**, monitor live **`hwmon` hardware telemetry**, and inspect `/etc/nixos/cockpit-managed.nix`.
 - **Automatic Upgrades & Boot Health-Checker (openSUSE MicroOS–style)**:
   - Nightly `system.autoUpgrade` with a configurable reboot window (`03:00`–`05:30`) and weekly `nix.gc` retaining the last 14 days of generations.
   - Three-layer protection: hardware watchdog + `panic=10`, native `systemd-boot` `bootCounting` (when available in `nixpkgs`), early boot-loop counter, and health probes gating `boot-complete.target`. Repeated boot failures on a new generation trigger an **automatic rollback** to the last known-good generation.
@@ -114,7 +112,7 @@ Import only the standalone module `nixos/cockpit-nixos-module.nix`:
 ```
 
 ### Accessing Cockpit
-Open `https://<SERVER-IP-OR-HOSTNAME>:9090` in your browser, sign in with your NixOS user account, click **Turn on administrative access** in the top banner, and navigate to **NixOS Déclaratif**.
+Open `https://<SERVER-IP-OR-HOSTNAME>:9090` (or `https://localhost:9090` over an SSH tunnel), sign in with your NixOS user account, and click **Turn on administrative access** in the top banner. Use the native **Storage**, **Networking**, **Software Updates**, **Podman**, **Virtual Machines**, and **Files** tabs directly, plus **Paquets** and **Générations** for NixOS-specific management.
 
 ---
 
@@ -124,14 +122,16 @@ All profile defaults use `lib.mkDefault`, so any setting can be overridden direc
 
 | Option | Default | Description |
 | :--- | :--- | :--- |
-| `services.cockpit-nixos.enable` | `true` *(profile)* / `false` *(module)* | Enable Cockpit and the declarative NixOS bridge |
+| `services.cockpit-nixos.enable` | `true` *(profile)* / `false` *(module)* | Enable Cockpit and the declarative NixOS bridges |
 | `services.cockpit-nixos.port` | `9090` | Cockpit HTTPS TCP port |
 | `services.cockpit-nixos.allowedOrigins` | `[ ]` | Extra allowed origins (`WebService.Origins`) for reverse proxies |
 | `services.cockpit-nixos.enableMachines` | `true` | Enable `cockpit-machines` + KVM/QEMU + `libvirtd` + `libvirt-dbus` |
 | `services.cockpit-nixos.enablePodman` | `true` | Enable `cockpit-podman` + Podman + `dockerCompat` + `dockerSocket` |
-| `services.cockpit-nixos.enableFiles` | `true` | Enable `cockpit-files` + `udisks2` + `/srv` & `/mnt` directories |
+| `services.cockpit-nixos.enableFiles` | `true` | Enable native Storage (`cockpit-storaged` + `udisks2` + `smartd` + FS tools) & `cockpit-files` |
+| `services.cockpit-nixos.enableStorageInterception` | `true` | Sync Storage (`udisks2`/`/etc/fstab`/mountinfo) changes into `/etc/nixos/cockpit-managed.nix` |
 | `services.cockpit-nixos.enableNetworkInterception` | `true` | Sync NetworkManager changes into `/etc/nixos/cockpit-managed.nix` |
 | `services.cockpit-nixos.enableFirewallBridge` | `true` | D-Bus bridge `org.fedoraproject.FirewallD1` → `networking.firewall` |
+| `services.cockpit-nixos.enablePackageKitBridge` | `true` | D-Bus bridge `org.freedesktop.PackageKit` → native *Software Updates* on NixOS |
 | `services.cockpit-nixos.enableAutoUpgrade` | `true` | Enable `system.autoUpgrade` + weekly `nix.gc` (14-day retention) |
 | `services.cockpit-nixos.autoUpgradeDates` | `"03:30"` | systemd `OnCalendar` schedule for automatic upgrades |
 | `services.cockpit-nixos.autoUpgradeRebootWindow` | `{ lower = "03:00"; upper = "05:30"; }` | Allowed time window for automatic reboots |
@@ -149,17 +149,17 @@ flowchart TB
   subgraph UI["Cockpit Web Console (:9090 HTTPS)"]
     P1["Networking (native)"]
     P2["Firewall (native)"]
-    P3["cockpit-machines (KVM/QEMU)"]
-    P4["cockpit-podman (Containers)"]
-    P5["cockpit-files (File Browser)"]
-    P6["NixOS Declarative Plugin\n(Generations, Rollback, GC, Packages,\nNetwork/FW, Mounts, Health & Sensors)"]
-    PK["PackageKit hidden\n(packagekit.override.json)"]
+    P3["Storage / Disks (native storaged)"]
+    P4["Software Updates (native packagekit)"]
+    P5["Podman / Machines / Files (native)"]
+    P6["Paquets & Générations\n(PatternFly 6 complementary tabs)"]
   end
 
-  subgraph INTERCEPT["Interception & Bridge Layer"]
-    NM["NetworkManager"]
-    NETW["cockpit-nixos-net-intercept\n(systemd.path + 3s debounce + SHA-256)"]
-    FWB["cockpit-nixos-firewall-bridge\n(D-Bus FirewallD1 -> NixOS)"]
+  subgraph INTERCEPT["Native Bridge & Interception Layer"]
+    NM["NetworkManager -> cockpit-nixos-net-intercept"]
+    FWB["cockpit-nixos-firewall-bridge\n(D-Bus FirewallD1)"]
+    STB["UDisks2 / fstab -> cockpit-nixos-storage-intercept"]
+    PKB["cockpit-nixos-packagekit-bridge\n(D-Bus PackageKit)"]
     CTL["cockpit-nixos-ctl\n(transactional CLI, flock, strict validation)"]
   end
 
@@ -170,8 +170,10 @@ flowchart TB
     HC["nixos-health-checker\n(boot-counter + boot-complete + live-check)"]
   end
 
-  P1 --> NM --> NETW --> CTL
+  P1 --> NM --> CTL
   P2 --> FWB --> CTL
+  P3 --> STB --> CTL
+  P4 --> PKB --> CTL
   P6 -- "cockpit.spawn (superuser)" --> CTL
   CTL --> STATE
   CTL --> MANAGED --> REBUILD --> HC
@@ -194,7 +196,7 @@ flowchart TB
 
 - **Strict input validation**: every package attribute, port, interface, IP address, hostname, and mount point (restricted to `/mnt/`, `/srv/`, `/media/`, `/data/`, `/var/lib/libvirt/images`, `/var/lib/containers`) is validated against strict allowlists prior to generating Nix code. Wi-Fi profiles (`802-11-wireless`) are intentionally excluded from NetworkManager sync so plaintext PSKs are never written to `/etc/nixos/cockpit-managed.nix`.
 - **Atomic transactions**: protected by `flock`, backed up before mutation, syntax-checked with `nix-instantiate --parse`, and automatically restored if `nixos-rebuild switch` fails.
-- **Least privilege**: `security.sudo` restricts `NOPASSWD`/`NOSETENV` strictly to the immutable Nix store binary `cockpit-nixos-ctl`, `security.polkit.extraConfig` scopes privileges to the `wheel` group, and the D-Bus policy denies firewall mutations and `reload` to non-`wheel` users.
+- **Least privilege**: `security.sudo` restricts `NOPASSWD`/`NOSETENV` strictly to the immutable Nix store binary `cockpit-nixos-ctl`, `security.polkit.extraConfig` scopes privileges to the `wheel` group, and D-Bus policies restrict `FirewallD1` and `PackageKit` mutations to `root` and `wheel`.
 
 ---
 
@@ -212,16 +214,17 @@ flowchart TB
 │   ├── cockpit-nixos-module.nix            # Generic reusable NixOS module (services.cockpit-nixos.*)
 │   └── configuration.nix                   # Full reference configuration.nix
 ├── plugin/                                 # Cockpit frontend (exact Cockpit PatternFly 6 CSS, strict CSP)
-│   ├── manifest.json                       # Registers 3 separate Cockpit sidebar entries
-│   ├── generations.html                    # Generations, Rollback, GC, Health-Checker & hwmon
-│   ├── packages.html                       # Declarative Nix package manager
-│   ├── config.html                         # Mounts, cockpit-managed.nix preview & native module links
+│   ├── manifest.json                       # Registers 2 complementary sidebar entries (Paquets, Générations)
+│   ├── packages.html                       # Declarative nixpkgs search & environment.systemPackages UI
+│   ├── generations.html                    # Generations, Rollback, GC, Health-Checker, hwmon & nix preview
 │   ├── style.css
 │   └── app.js
-└── backend/                                # Python 3 CLI & background services
+└── backend/                                # Python 3 CLI, D-Bus bridges & watchers
     ├── cockpit-nixos-ctl.py                # Privileged transactional CLI
     ├── cockpit-nixos-net-intercept.py      # NetworkManager -> NixOS interceptor
+    ├── cockpit-nixos-storage-intercept.py  # UDisks2/fstab/mountinfo -> NixOS interceptor
     ├── cockpit-nixos-firewall-bridge.py    # D-Bus FirewallD1 -> networking.firewall bridge
+    ├── cockpit-nixos-packagekit-bridge.py  # D-Bus PackageKit -> NixOS Software Updates & packages bridge
     └── nixos-health-checker.py             # MicroOS-style boot health-checker & auto-rollback
 ```
 
@@ -230,8 +233,11 @@ flowchart TB
 ## Useful Diagnostic Commands
 
 ```bash
-# Check core services
-systemctl status cockpit.socket podman.socket libvirtd cockpit-nixos-firewall-bridge nixos-health-checker nixos-upgrade.timer
+# Check Cockpit and declarative NixOS bridges
+systemctl status cockpit.socket udisks2 cockpit-nixos-firewall-bridge cockpit-nixos-packagekit-bridge cockpit-nixos-storage-intercept nixos-health-checker nixos-upgrade.timer
+
+# View full Cockpit web/bridge logs (including dynamic wsinstance units)
+journalctl -u 'cockpit*' -n 50 --no-pager
 
 # Run health probes manually
 sudo nixos-health-checker --check-only

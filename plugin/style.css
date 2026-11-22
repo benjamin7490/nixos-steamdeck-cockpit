@@ -138,6 +138,17 @@ body {
   gap: var(--pf-t--global--spacer--md, 1rem);
 }
 
+.nixos-details-summary {
+  cursor: pointer;
+  user-select: none;
+  list-style-position: outside;
+  padding: var(--pf-t--global--spacer--xs, 0.25rem) 0;
+}
+
+.nixos-details-body {
+  margin-top: var(--pf-t--global--spacer--md, 1rem);
+}
+
 .nixos-hidden {
   display: none !important;
 }

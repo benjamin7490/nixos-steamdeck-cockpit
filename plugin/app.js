@@ -516,6 +516,7 @@
     on("btn-open-firewall", "click", function () { cockpit.jump("/network/firewall"); });
     on("btn-open-files", "click", function () { cockpit.jump("/files"); });
     on("btn-open-storage", "click", function () { cockpit.jump("/storage"); });
+    on("btn-open-updates", "click", function () { cockpit.jump("/updates"); });
 
     on("btn-rebuild-now", "click", function () {
       spawnCtlWrite(["rebuild"], "nixos-rebuild switch");

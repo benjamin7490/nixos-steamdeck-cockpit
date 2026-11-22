@@ -119,8 +119,10 @@ in
         enableMachines = lib.mkDefault true;
         enablePodman = lib.mkDefault true;
         enableFiles = lib.mkDefault true;
+        enableStorageInterception = lib.mkDefault true;
         enableNetworkInterception = lib.mkDefault true;
         enableFirewallBridge = lib.mkDefault true;
+        enablePackageKitBridge = lib.mkDefault true;
         enableAutoUpgrade = lib.mkDefault true;
         autoUpgradeDates = lib.mkDefault "03:30";
         autoUpgradeRebootWindow = lib.mkDefault {
