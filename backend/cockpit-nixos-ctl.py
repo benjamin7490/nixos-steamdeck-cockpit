@@ -17,6 +17,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -206,7 +207,7 @@ def safe_log(text: str) -> None:
             _STDOUT_CLOSED = True
 
 
-def stream_cmd(cmd: list, check: bool = True) -> int:
+def stream_cmd(cmd: list, check: bool = True, cwd: str | None = None) -> int:
     safe_log("$ " + " ".join(cmd) + "\n")
     proc = subprocess.Popen(
         cmd,
@@ -214,6 +215,7 @@ def stream_cmd(cmd: list, check: bool = True) -> int:
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        cwd=cwd,
     )
     assert proc.stdout is not None
     for line in proc.stdout:
@@ -418,24 +420,13 @@ def cmd_updates_check() -> None:
         safe_log("[1/3] Mise à jour des canaux NixOS (nix-channel --update)...\n")
         stream_cmd(["nix-channel", "--update"], check=False)
 
-        safe_log("[2/3] Évaluation de la prochaine génération (nixos-rebuild build --no-out-link)...\n")
-        eval_res = subprocess.run(
-            ["nixos-rebuild", "build", "--no-out-link"],
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
-        if eval_res.stderr:
-            safe_log(eval_res.stderr)
-        if eval_res.returncode != 0:
-            raise RuntimeError("Échec de l'évaluation NixOS (code " + str(eval_res.returncode) + ").")
-
+        safe_log("[2/3] Évaluation de la prochaine génération (nixos-rebuild build)...\n")
         target_path = ""
-        for line in reversed((eval_res.stdout or "").splitlines()):
-            s = line.strip()
-            if s.startswith("/nix/store/"):
-                target_path = s
-                break
+        with tempfile.TemporaryDirectory(prefix="cockpit-nixos-check-") as tmpdir:
+            stream_cmd(["nixos-rebuild", "build"], check=True, cwd=tmpdir)
+            result_link = Path(tmpdir) / "result"
+            if result_link.exists():
+                target_path = os.path.realpath(str(result_link))
 
         current_sys = os.path.realpath("/run/current-system")
         updates = []

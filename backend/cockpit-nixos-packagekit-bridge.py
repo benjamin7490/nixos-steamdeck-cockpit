@@ -20,6 +20,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -143,21 +144,20 @@ def compute_nixos_updates() -> list:
     """Évalue la configuration avec le canal actuel et compare avec /run/current-system."""
     with _CACHE_LOCK:
         ensure_nix_env()
-        eval_res = subprocess.run(
-            ["nixos-rebuild", "build", "--no-out-link"],
-            capture_output=True,
-            text=True,
-            timeout=600,
-        )
-        if eval_res.returncode != 0:
-            return []
-
         target_path = ""
-        for line in reversed((eval_res.stdout or "").splitlines()):
-            s = line.strip()
-            if s.startswith("/nix/store/"):
-                target_path = s
-                break
+        with tempfile.TemporaryDirectory(prefix="cockpit-pk-check-") as tmpdir:
+            eval_res = subprocess.run(
+                ["nixos-rebuild", "build"],
+                capture_output=True,
+                text=True,
+                timeout=600,
+                cwd=tmpdir,
+            )
+            if eval_res.returncode != 0:
+                return []
+            result_link = Path(tmpdir) / "result"
+            if result_link.exists():
+                target_path = os.path.realpath(str(result_link))
         if not target_path or not Path(target_path).exists():
             return []
 
@@ -434,13 +434,15 @@ class PackageKitTransaction(dbus.service.Object):
 
                 if flags & PK_TX_FLAG_ONLY_DOWNLOAD:
                     self._set_props(Status=dbus.UInt32(PK_STATUS_DOWNLOAD), Percentage=dbus.UInt32(40))
-                    res = with_rebuild_lock(
-                        lambda: subprocess.run(
-                            ["nixos-rebuild", "build", "--upgrade", "--no-out-link"],
-                            capture_output=True,
-                            text=True,
-                        )
-                    )
+                    def _do_download():
+                        with tempfile.TemporaryDirectory(prefix="cockpit-pk-dl-") as tmpdir:
+                            return subprocess.run(
+                                ["nixos-rebuild", "build", "--upgrade"],
+                                capture_output=True,
+                                text=True,
+                                cwd=tmpdir,
+                            )
+                    res = with_rebuild_lock(_do_download)
                     if res.returncode != 0:
                         err = (res.stderr or res.stdout or "Échec du pré-téléchargement nixos-rebuild")[-600:]
                         self._emit_error(PK_ERROR_INTERNAL, err)
